@@ -1,0 +1,31 @@
+{
+	"name": "pi-watchdog",
+	"version": "1.0.0",
+	"description": "pi 插件：自动继续监控。AI 停下后自动替你催它继续，直到任务真正完成——你不用守着手动敲「继续」。",
+	"main": "index.ts",
+	"dependencies": {
+		"jiti": "^2.7.0",
+		"typebox": "^1.3.7",
+		"typescript": "^7.0.2",
+		"undici-types": "^8.3.0"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.5.14",
+		"@earendil-works/pi-coding-agent": "^0.85.1",
+		"@types/node": "^22.20.3",
+		"vitest": "^5.0.1"
+	},
+	"scripts": {
+		"format": "biome format --write .",
+		"lint": "biome lint .",
+		"check:biome": "biome check .",
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"typecheck": "tsc --noEmit",
+		"prepare": "git config core.hooksPath .githooks"
+	},
+	"keywords": [],
+	"author": "",
+	"license": "ISC",
+	"type": "commonjs"
+}
