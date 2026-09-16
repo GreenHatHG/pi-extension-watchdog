@@ -3,7 +3,11 @@ import { Type } from "typebox";
 
 const DEFAULT_TIMEOUT_SECONDS = 60;
 const DEFAULT_MAX_NUDGES = 50;
-const DEFAULT_MESSAGE = "若任务已全部完成，请调用 stop_watchdog 工具停止自动继续，否则继续执行";
+const DEFAULT_MESSAGE =
+	"[Automated, not user input, not approval] " +
+	"1. All tasks done → call stop_watchdog to stop. " +
+	"2. Not done, no user decision needed → continue. " +
+	"3. Waiting for user's reply/confirmation (e.g. discuss before editing) → don't change code, call stop_watchdog and wait for the user's next message.";
 
 /** 用户最后一次按键后多久内视为「仍在操作」（上下选择、翻历史等），期间暂停倒计时 */
 const ACTIVITY_GRACE_MS = 2000;

@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { setup } from "./helpers/setup.js";
 
-const DEFAULT_MSG = "若任务已全部完成，请调用 stop_watchdog 工具停止自动继续，否则继续执行";
+const DEFAULT_MSG =
+	"[Automated, not user input, not approval] " +
+	"① All tasks done → call stop_watchdog to stop. " +
+	"② Not done, no user decision needed → continue. " +
+	"③ Waiting for user's reply/confirmation (e.g. discuss before editing) → don't change code, call stop_watchdog and wait for the user's next message.";
 
 beforeEach(() => {
 	vi.useFakeTimers();
