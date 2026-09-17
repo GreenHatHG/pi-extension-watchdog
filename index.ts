@@ -4,9 +4,12 @@ import { Type } from "typebox";
 const DEFAULT_TIMEOUT_SECONDS = 60;
 const DEFAULT_MAX_NUDGES = 50;
 /** 催促触发行：固定语义，永不缺席（message= 只追加 Task instruction，不会替换本行） */
-export const DEFAULT_MESSAGE = "[Automated, not user input] If work remains, continue; otherwise call stop_watchdog.";
+export const DEFAULT_MESSAGE =
+	"[Automated, not user input] If work remains, continue working (no reply needed). " +
+	"If waiting on a user decision, don't change code — state what you need, then call stop_watchdog as your final action. " +
+	"If no work remains and no decision is pending, call stop_watchdog to end the turn.";
 
-/** 组装催促消息：固定触发行 + 可选追加指令（message=），自定义内容不会替换触发行语义 */
+/** 组装催促消息：固定触发行 + 可选追加指令（message=），自定义内容不会替换触发行语义。 */
 export function nudgeText(hint?: string): string {
 	return hint ? `${DEFAULT_MESSAGE}\n\nTask instruction: ${hint}` : DEFAULT_MESSAGE;
 }
@@ -529,13 +532,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: TOOL_NAME,
 		label: "停止自动继续",
-		description:
-			"The watchdog monitor injects '[Automated, not user input]' nudge messages when the agent idles. " +
-			"Call this tool only in response to such a nudge, when no work remains and no user decision is pending; " +
-			"it ends the turn immediately (like Esc). If work remains, continue working (no reply needed); " +
-			"if waiting on a user decision, don't change code — state what you need, then call this tool " +
-			"as your final action. Keep mode: suspends only, auto-resumes on the user's next message. " +
-			"When the monitor isn't running, calling this is unnecessary.",
+		description: "Ends the turn immediately; call only after a watchdog nudge when no work remains.",
 		parameters: Type.Object({}),
 		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
 			if (!state.running) {
@@ -544,8 +541,8 @@ export default function (pi: ExtensionAPI) {
 						{
 							type: "text",
 							text: state.suspended
-								? "已处于挂起状态，无需停止；用户发送新消息时监控会自动恢复。"
-								: "watchdog 未在运行，无需停止；仅在收到 [Automated, not user input] 催促消息后才需要调用本工具。",
+								? "Already suspended. Nothing to do — end your turn normally."
+								: 'Watchdog is not running. Only call this after a "[Automated, not user input]" nudge.',
 						},
 					],
 					details: {},
@@ -571,9 +568,7 @@ export default function (pi: ExtensionAPI) {
 				content: [
 					{
 						type: "text",
-						text: suspendedNow
-							? "已临时挂起自动继续监控；用户发送新消息时会自动恢复，届时无需你再调用本工具。"
-							: "已停止自动继续监控。",
+						text: "OK.",
 					},
 				],
 				details: {},

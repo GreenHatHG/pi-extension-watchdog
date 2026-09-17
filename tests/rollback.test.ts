@@ -82,7 +82,7 @@ it("PI_WATCHDOG_ROLLBACK=false 同样不回滚", async () => {
 it("stop_watchdog 后回滚：nudge 交换从上下文砍掉，叶子回到催促前", async () => {
 	const rt = await setup();
 	const result = await runStopFlow(rt, "回滚测试");
-	expect(JSON.stringify(result.content)).toContain("已停止");
+	expect(JSON.stringify(result.content)).toContain("OK.");
 	await rt.settleAbortedTurn(); // agent_settled → 跳板 → 校验 → 回滚
 
 	expect(rt.rollbackCalls).toEqual(["hist"]); // navigateTree 回到催促前叶子

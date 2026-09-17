@@ -18,7 +18,7 @@ it("AI 调用 stop_watchdog（once 模式）→ 彻底停止，工具常驻不�
 	expect(rt.sentMessages.at(-1)).toBe(nudge("工具测试")); // 停止前已催促过一次
 
 	const result = await rt.tools.get("stop_watchdog").execute("t1", {}, undefined, undefined, rt.ctx);
-	expect(JSON.stringify(result.content)).toContain("已停止");
+	expect(JSON.stringify(result.content)).toContain("OK.");
 
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1300);
@@ -29,7 +29,7 @@ it("AI 调用 stop_watchdog（once 模式）→ 彻底停止，工具常驻不�
 it("未运行时调用 stop_watchdog 返回无需停止", async () => {
 	const rt = await setup();
 	const result = await rt.tools.get("stop_watchdog").execute("t0", {}, undefined, undefined, rt.ctx);
-	expect(JSON.stringify(result.content)).toContain("未在运行");
+	expect(JSON.stringify(result.content)).toContain("not running");
 });
 
 it("挂起状态下再调 stop_watchdog → 返回已挂起，状态不变", async () => {
@@ -39,7 +39,7 @@ it("挂起状态下再调 stop_watchdog → 返回已挂起，状态不变", asy
 	await rt.tools.get("stop_watchdog").execute("t2", {}, undefined, undefined, rt.ctx); // 挂起
 
 	const result = await rt.tools.get("stop_watchdog").execute("t3", {}, undefined, undefined, rt.ctx);
-	expect(JSON.stringify(result.content)).toContain("已处于挂起状态");
+	expect(JSON.stringify(result.content)).toContain("Already suspended");
 	await rt.commands.get("watchdog").handler("status", rt.ctx); // 状态仍是挂起，未被二次调用破坏
 	expect(rt.notifications.some((n) => n.msg.includes("挂起中"))).toBe(true);
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);

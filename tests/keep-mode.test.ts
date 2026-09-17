@@ -18,7 +18,7 @@ it("keep 模式：超时催促 → AI 调 stop_watchdog 仅挂起 → interactiv
 
 	// AI 调用 stop_watchdog → 挂起而非关闭
 	const r = await rt.tools.get("stop_watchdog").execute("t10", {}, undefined, undefined, rt.ctx);
-	expect(JSON.stringify(r.content)).toContain("挂起");
+	expect(JSON.stringify(r.content)).toContain("OK.");
 	expect(rt.activeTools.has("stop_watchdog")).toBe(true);
 
 	await rt.settleAfterRun();
@@ -100,7 +100,7 @@ it("PI_WATCHDOG mode=keep：自动以常驻模式启动，挂起后新消息恢�
 	expect(rt.sentMessages.at(-1)).toBe(nudge("常驻env文案"));
 
 	const r = await rt.tools.get("stop_watchdog").execute("t11", {}, undefined, undefined, rt.ctx);
-	expect(JSON.stringify(r.content)).toContain("挂起");
+	expect(JSON.stringify(r.content)).toContain("OK.");
 
 	await rt.emit("input", { text: "继续新任务", source: "interactive" });
 	expect(rt.notifications.some((n) => n.msg.includes("已恢复"))).toBe(true);
