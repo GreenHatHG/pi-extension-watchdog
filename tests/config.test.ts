@@ -1,4 +1,5 @@
 import { beforeEach, expect, it, vi } from "vitest";
+import { nudgeText as nudge } from "../index.ts";
 import { setup } from "./helpers/setup.js";
 
 beforeEach(() => {
@@ -33,7 +34,7 @@ it("合法参数组合 timeout/max/message 解析生效并按配置催促", asyn
 	await rt.commands.get("watchdog").handler("timeout=1 max=2 message=解析测试", rt.ctx);
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1100);
-	expect(rt.sentMessages.at(-1)).toBe("解析测试");
+	expect(rt.sentMessages.at(-1)).toBe(nudge("解析测试"));
 	await rt.settleAfterRun();
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 	expect(rt.notifications.some((n) => n.msg.includes("监控已停止"))).toBe(true);
@@ -44,7 +45,7 @@ it("message= 含空格的多 token 文案拼接", async () => {
 	await rt.commands.get("watchdog").handler("timeout=1 message=继续 下一步", rt.ctx);
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1100);
-	expect(rt.sentMessages.at(-1)).toBe("继续 下一步");
+	expect(rt.sentMessages.at(-1)).toBe(nudge("继续 下一步"));
 	await rt.settleAfterRun();
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });

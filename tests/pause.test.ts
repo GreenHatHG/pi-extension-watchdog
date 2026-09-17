@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { nudgeText as nudge } from "../index.ts";
 import { setup } from "./helpers/setup.js";
 
 beforeEach(() => {
@@ -20,7 +21,7 @@ it("倒计时中用户开始输入 → 暂停；清空后恢复并催促", async
 
 	rt.state.editorText = "";
 	await vi.advanceTimersByTimeAsync(2100); // ticker 先轮询恢复（≤1s）+ 完整超时 1s
-	expect(rt.sentMessages.at(-1)).toBe("输入测试");
+	expect(rt.sentMessages.at(-1)).toBe(nudge("输入测试"));
 	await rt.settleAfterRun();
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });
@@ -35,7 +36,7 @@ it("agent_settled 时编辑器已有文字 → 暂停不催促；清空后恢复
 
 	rt.state.editorText = "";
 	await vi.advanceTimersByTimeAsync(2100);
-	expect(rt.sentMessages.at(-1)).toBe("输入测试2");
+	expect(rt.sentMessages.at(-1)).toBe(nudge("输入测试2"));
 	await rt.settleAfterRun();
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });
@@ -50,7 +51,7 @@ it("倒计时中按键操作 → 立即暂停；操作停止（2s grace）后恢
 	expect(rt.sentMessages).not.toContain("操作测试");
 
 	await vi.advanceTimersByTimeAsync(3000); // 2s grace 过去 → ticker 恢复倒计时 → 超时催促
-	expect(rt.sentMessages.at(-1)).toBe("操作测试");
+	expect(rt.sentMessages.at(-1)).toBe(nudge("操作测试"));
 	await rt.settleAfterRun();
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });

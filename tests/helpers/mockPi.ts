@@ -11,6 +11,7 @@ export function createMockRuntime() {
 	// 模拟 pi 的 active tools：registerTool 注册的工具默认进入 active 集合
 	const activeTools = new Set<string>(["read", "bash", "edit", "write"]);
 	const sentMessages: string[] = [];
+	let abortedTurns = 0;
 	const notifications: { msg: string; kind: string }[] = [];
 	const sessionEntries: any[] = [{ type: "message" }]; // 默认已有对话消息（模拟非空会话）；需要全新会话的用例显式清空
 	const statusBars = new Map<string, string | undefined>();
@@ -21,6 +22,11 @@ export function createMockRuntime() {
 
 	const ctx: any = {
 		isIdle: () => idle,
+		// 模拟真实 pi：中止当前 agent 回合并回到空闲
+		abort: () => {
+			abortedTurns++;
+			idle = true;
+		},
 		sessionManager: {
 			getBranch: () => sessionEntries,
 		},
@@ -101,6 +107,9 @@ export function createMockRuntime() {
 			},
 			set editorText(v: string) {
 				editorText = v;
+			},
+			get abortedTurns() {
+				return abortedTurns;
 			},
 		},
 		tools,

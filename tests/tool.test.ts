@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { nudgeText as nudge } from "../index.ts";
 import { setup } from "./helpers/setup.js";
 
 beforeEach(() => {
@@ -9,20 +10,20 @@ afterEach(() => {
 	vi.useRealTimers();
 });
 
-it("AI 调用 stop_watchdog（once 模式）→ 彻底停止，工具移出 active tools", async () => {
+it("AI 调用 stop_watchdog（once 模式）→ 彻底停止，工具常驻不移出", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1 message=工具测试", rt.ctx);
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1100);
-	expect(rt.sentMessages.at(-1)).toBe("工具测试"); // 停止前已催促过一次
+	expect(rt.sentMessages.at(-1)).toBe(nudge("工具测试")); // 停止前已催促过一次
 
 	const result = await rt.tools.get("stop_watchdog").execute("t1", {}, undefined, undefined, rt.ctx);
 	expect(JSON.stringify(result.content)).toContain("已停止");
 
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1300);
-	expect(rt.sentMessages.at(-1)).toBe("工具测试"); // 停止后不再催促
-	expect(rt.activeTools.has("stop_watchdog")).toBe(false);
+	expect(rt.sentMessages.at(-1)).toBe(nudge("工具测试")); // 停止后不再催促
+	expect(rt.activeTools.has("stop_watchdog")).toBe(true); // 常驻注册：工具始终保留，不再随启停移出
 });
 
 it("未运行时调用 stop_watchdog 返回无需停止", async () => {

@@ -6,6 +6,8 @@ pi 插件：自动继续监控。AI 停下后自动替你催它继续，直到�
 
 AI 停止输出、进入空闲后开始倒计时；倒计时期间 AI 再次运行（或你发消息、正在输入、正在按键操作）则自动暂停/取消；倒计时归零仍空闲，就以你的名义发一条催促消息，触发新一轮。如此循环，直到你或 AI 主动停止。
 
+催促消息由两部分组成：固定触发行（`[Automated, not user input] If work remains, continue; otherwise call stop_watchdog.`，永不缺席）+ 可选的追加指令。`message=` 设置的文案不会替换触发行，而是作为 `Task instruction` 追加在其后，保证自定义文案不会丢失「继续干活或主动停止」的核心语义。
+
 状态栏实时显示：`⏱23s 2/50`（倒计时中 · 已催 2/50 次）、`⏱▶`（等 AI 空闲）、`⏱✍`（你在输入/操作，暂停中）、`⏱⏸`（常驻模式挂起中）。
 
 ## 用户故事
@@ -17,7 +19,7 @@ AI 因网络抖动或「自以为完成」停下时，watchdog 自动催它继�
 ```
 /watchdog                       # 空闲 60s 催一次，默认文案，最多催 50 次
 /watchdog timeout=30            # 空闲 30s 催一次
-/watchdog timeout=30 message=继续    # 自定义催促文案
+/watchdog timeout=30 message=继续    # 追加指令：触发行 + "Task instruction: 继续"
 /watchdog timeout=30 max=100    # 卡死保险上限提到 100 次
 ```
 
@@ -68,7 +70,9 @@ PI_WATCHDOG="timeout=30 max=100" tmux new-session -d -s work pi
 
 插件注册 `stop_watchdog` 工具供 AI 主动退出循环：
 
-> 停止 watchdog 自动继续监控。当你已完成全部任务、不需要再被自动催促继续时调用此工具。若监控处于常驻模式，此调用只是临时挂起，用户发送新消息时会自动恢复监控。
+> Stop the watchdog auto-continue monitor. An automated nudge means: if work remains, continue working (no reply needed); otherwise finish what the user should see, then call this tool as your final action — it ends the turn immediately (like Esc). Keep mode: suspends only, auto-resumes on the user's next message.
+>
+> 调用本工具会像按 Esc 一样立即结束当前回合（`ctx.abort()`），截断工具调用后的多余回复。
 
 ## 安装
 
@@ -80,14 +84,14 @@ cp index.ts ~/.pi/agent/extensions/watchdog.ts
 mkdir -p .pi/extensions && cp index.ts .pi/extensions/watchdog.ts
 ```
 
-在 pi 中用 `/reload` 热加载。运行测试：`npm test`（vitest，24 用例；开发时用 `npm run test:watch`）。
+在 pi 中用 `/reload` 热加载。运行测试：`npm test`（vitest，28 用例；开发时用 `npm run test:watch`）。
 
 # todo
 - `⏱▶`图标不协调
 - 确定停止工具是不是渐进式上下文注入
 - index.ts去除使用说明注释
 - 多久催促默认值改为5
-- stop_watchdog之后能不能模拟一下用户按了esc，这样就能强行停止llm的回复了
+- ~~stop_watchdog之后能不能模拟一下用户按了esc，这样就能强行停止llm的回复了~~（已实现：`ctx.abort()`，与 ESC 同路径）
 - 之前的催促的消息不应该进入上下文
 - parseConfig应该配合ctx.ui.notify精细化提示
 - parseConfig添加单元测试（已由 tests/config.test.ts 覆盖）
