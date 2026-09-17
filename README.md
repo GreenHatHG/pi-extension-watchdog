@@ -84,9 +84,13 @@ cp index.ts ~/.pi/agent/extensions/watchdog.ts
 mkdir -p .pi/extensions && cp index.ts .pi/extensions/watchdog.ts
 ```
 
-在 pi 中用 `/reload` 热加载。运行测试：`npm test`（vitest，28 用例；开发时用 `npm run test:watch`）。
+在 pi 中用 `/reload` 热加载。运行测试：`npm test`（vitest，37 用例；开发时用 `npm run test:watch`）。
 
-# todo
+## 上下文回滚（可选）
+
+默认关闭。启动 pi 前设置 `PI_WATCHDOG_ROLLBACK=1` 开启：AI 调 `stop_watchdog` 后，会把本次催促消息及 AI 的回应从上下文中回滚，避免多余的「停止确认往返」污染上下文。设置在会话重载时重新读取。
+
+## todo
 - `⏱▶`图标不协调
 - 确定停止工具是不是渐进式上下文注入
 - index.ts去除使用说明注释
