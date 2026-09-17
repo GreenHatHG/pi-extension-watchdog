@@ -103,6 +103,62 @@ interface WatchdogState {
 	ticker: ReturnType<typeof setInterval> | null;
 }
 
+/** PI_WATCHDOG_ROLLBACK=1/true 开启 stop 后上下文回滚，默认关闭 */
+function isRollbackEnvEnabled(): boolean {
+	const flag = process.env.PI_WATCHDOG_ROLLBACK?.trim().toLowerCase();
+	return flag === "1" || flag === "true";
+}
+
+/**
+ * 校验回滚点之后是否只有本次催促的 stop 交换（纯尾巴）。
+ * 只允许删后缀：中段删除会位移后续字节打爆 prompt cache，
+ * 且会产生未配对的 tool_use。发现任何非催促交换的内容（真活）都返回 false。
+ */
+function validateRollbackTail(sessionManager: any, targetId: string, nudgeFullText: string): boolean {
+	let branch: any[];
+	try {
+		branch = sessionManager.getBranch();
+	} catch {
+		return false;
+	}
+	const idx = branch.findIndex((e: any) => e?.id === targetId);
+	if (idx === -1) return false;
+	const tail = branch.slice(idx + 1);
+	if (tail.length === 0) return false;
+	let sawStopExchange = false;
+	for (const e of tail) {
+		if (e.type !== "message") return false; // custom/compaction 等任何其他类型都不可回滚
+		const msg = e.message;
+		if (!msg) return false;
+		if (msg.role === "user") {
+			const text =
+				typeof msg.content === "string"
+					? msg.content
+					: (msg.content ?? [])
+							.filter((c: any) => c.type === "text")
+							.map((c: any) => c.text)
+							.join("");
+			if (text !== nudgeFullText) return false; // 有真实用户消息混入
+		} else if (msg.role === "assistant") {
+			// 文字不作为真活证据：回滚会把 nudge 后整段交换删掉（含本条消息），
+			// 文字本身无状态、删掉无损失；真活的证据是工具调用。
+			for (const c of msg.content ?? []) {
+				if (c.type === "toolCall") {
+					if (c.name !== TOOL_NAME) return false; // 调了别的工具 = 干了活
+					sawStopExchange = true;
+				}
+				// text/thinking 允许：abort 截不掉 toolCall 前已落盘的文字，纯文字回复也无状态
+			}
+		} else if (msg.role === "toolResult") {
+			if (msg.toolName !== TOOL_NAME) return false;
+			sawStopExchange = true;
+		} else {
+			return false;
+		}
+	}
+	return sawStopExchange;
+}
+
 export default function (pi: ExtensionAPI) {
 	const state: WatchdogState = {
 		running: false,
@@ -126,6 +182,12 @@ export default function (pi: ExtensionAPI) {
 	let _suspendedStore = false;
 	/** 原始按键监听的取消函数（interactive 模式才有） */
 	let unsubTerminalInput: (() => void) | null = null;
+	/** 是否启用 stop 后上下文回滚：默认关闭，设 PI_WATCHDOG_ROLLBACK=1 开启（加载时读取，会话重载时刷新） */
+	let rollbackEnabled = isRollbackEnvEnabled();
+	/** 最近一次催促发送前的 leaf id + 催促全文，供 stop 后回滚校验 */
+	let rollbackMark: { leafId: string; nudgeFullText: string } | null = null;
+	/** 待执行的上下文回滚：stop_watchdog 调用后，把 nudge 交换从会话尾部砍掉 */
+	let pendingRollback: { leafId: string; nudgeFullText: string } | null = null;
 
 	function clearCountdown() {
 		if (state.timer) {
@@ -297,6 +359,17 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		try {
+			// 记录回滚点：发送前的 leaf。stop 后若 nudge 之后只有 stop 交换，可砸尾回滚
+			// 仅在启用回滚时记录标记；默认关闭，stop 后上下文保持现状
+			if (rollbackEnabled) {
+				try {
+					const leafId = (ctx.sessionManager as any)?.getLeafId?.();
+					const fullText = nudgeText(state.message || undefined);
+					rollbackMark = typeof leafId === "string" ? { leafId, nudgeFullText: fullText } : null;
+				} catch {
+					rollbackMark = null;
+				}
+			}
 			// 空闲状态直接发送，触发新一轮
 			pi.sendUserMessage(nudgeText(state.message || undefined));
 			ctx.ui.notify(`watchdog: 已发送催促消息 (${state.nudgeCount}/${state.maxNudges})`, "info");
@@ -386,8 +459,11 @@ export default function (pi: ExtensionAPI) {
 	// ---------- 事件 ----------
 
 	pi.on("session_start", async (_event, ctx) => {
+		rollbackEnabled = isRollbackEnvEnabled(); // 会话重载/切换时重新读取
 		const envConfig = parseEnvConfig();
 		if (envConfig && !state.running) {
+			// env 启动与手动命令同走 startWatchdog；回滚能力由内部命令跳板提供，
+			// 不依赖启动路径，因此无需借命令自举
 			startWatchdog(
 				ctx,
 				envConfig.timeoutSeconds,
@@ -417,6 +493,19 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_settled", async (_event, ctx) => {
+		// stop_watchdog 刚被调用：把本次 nudge 交换从上下文砸尾回滚。
+		// 通过内部命令跳板拿到 command ctx（只有命令 handler 才有 navigateTree）。
+		// 注意放在 running 检查之前：stop 后 running 已是 false。
+		// 不在此处消费 pendingRollback，由 watchdog-internal 命令统一消费。
+		if (pendingRollback) {
+			try {
+				await (pi.sendUserMessage as any)(`/watchdog-internal op=rollback target=${pendingRollback.leafId}`, {
+					expandPromptTemplates: true,
+				});
+			} catch {
+				// 发送失败则保留现状（下次 settled 重试；校验不过则自动放弃）
+			}
+		}
 		if (!state.running) return;
 		activeCtx = ctx;
 		armCountdown(ctx); // AI 停止输出（含重试/排队都结束后），重新倒计时
@@ -432,6 +521,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		teardown(ctx);
+		pendingRollback = null;
 	});
 
 	// ---------- 给 AI 的停止工具 ----------
@@ -462,6 +552,11 @@ export default function (pi: ExtensionAPI) {
 				};
 			}
 			teardown(ctx, false);
+			// 记录待回滚标记：agent_settled 后经内部命令砸尾，把 nudge 交换从上下文移除
+			if (rollbackMark) {
+				pendingRollback = rollbackMark;
+				rollbackMark = null;
+			}
 			const suspendedNow = state.keepAlive;
 			ctx.ui.notify(
 				suspendedNow
@@ -563,6 +658,27 @@ export default function (pi: ExtensionAPI) {
 					);
 					break;
 				}
+			}
+		},
+	});
+
+	// ---------- 内部回滚命令 ----------
+	// 隐藏命令（无 description，不进补全列表）：唯一调用方是 agent_settled 里的
+	// sendUserMessage 跳板，作用是把命令专属的 command ctx（含 navigateTree）带进扩展。
+	pi.registerCommand("watchdog-internal", {
+		handler: async (args, cmdCtx) => {
+			const pr = pendingRollback;
+			pendingRollback = null; // 只在命令里消费一次
+			if (!pr) return;
+			const target = /(?:^|\s)target=(\S+)/.exec(args)?.[1];
+			if (!target || target !== pr.leafId) return; // 参数不匹配（防误调）
+			const sm: any = cmdCtx.sessionManager;
+			if (!validateRollbackTail(sm, target, pr.nudgeFullText)) return; // 尾部有真活，放弃
+			try {
+				await (cmdCtx as any).navigateTree(target, { summarize: false });
+				cmdCtx.ui.notify("watchdog: 已回滚本次催促交换（上下文恢复到催促前）", "info");
+			} catch {
+				// navigateTree 失败则保留现状（nudge 交换留在上下文，不影响正确性）
 			}
 		},
 	});
