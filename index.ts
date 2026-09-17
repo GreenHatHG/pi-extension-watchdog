@@ -237,10 +237,13 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
+	/** 工具是否已注册：只在首次启动监控时注册一次，之后常驻不移出（保缓存前缀稳定） */
+	let toolRegistered = false;
+
 	/**
-	 * 停止/挂起：清定时器、清状态栏、移出 stop_watchdog 工具。
-	 * 常驻模式下只临时挂起（工具保持可见，新用户消息可恢复）；
-	 * 非常驻模式或 explicit=true 时彻底关闭。幂等。
+	 * 停止/挂起：清定时器、清状态栏。工具保持注册不移出（pi 无 unregisterTool，
+	 * 且移出 active 集会破坏 prompt cache 前缀）。常驻模式下只临时挂起
+	 * （新用户消息可恢复）；非常驻模式或 explicit=true 时彻底关闭。幂等。
 	 */
 	function teardown(ctx?: ExtensionContext, explicit = true) {
 		const suspend = state.keepAlive && !explicit && state.running;
@@ -427,6 +430,12 @@ export default function (pi: ExtensionAPI) {
 		maxNudges?: number,
 		keepAlive = false,
 	) {
+		// 首次启动才注册工具：未启用监控的会话里工具定义不进请求，不占 token；
+		// 注册后常驻不移出，中途不再变更 tools 列表（保缓存前缀稳定）
+		if (!toolRegistered) {
+			toolRegistered = true;
+			registerStopTool();
+		}
 		// 支持运行中重新 start：重置参数和计数
 		teardown();
 		state.keepAlive = keepAlive;
@@ -529,52 +538,55 @@ export default function (pi: ExtensionAPI) {
 
 	// ---------- 给 AI 的停止工具 ----------
 
-	pi.registerTool({
-		name: TOOL_NAME,
-		label: "停止自动继续",
-		description: "Ends the turn immediately; call only after a watchdog nudge when no work remains.",
-		parameters: Type.Object({}),
-		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-			if (!state.running) {
+	/** 注册 stop_watchdog 工具。由 startWatchdog 首次启动时调用（pi.registerTool 支持 startup 后调用） */
+	function registerStopTool() {
+		pi.registerTool({
+			name: TOOL_NAME,
+			label: "停止自动继续",
+			description: "Ends the turn immediately; call only after a watchdog nudge when no work remains.",
+			parameters: Type.Object({}),
+			async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+				if (!state.running) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: state.suspended
+									? "Already suspended. Nothing to do — end your turn normally."
+									: 'Watchdog is not running. Only call this after a "[Automated, not user input]" nudge.',
+							},
+						],
+						details: {},
+					};
+				}
+				teardown(ctx, false);
+				// 记录待回滚标记：agent_settled 后经内部命令砸尾，把 nudge 交换从上下文移除
+				if (rollbackMark) {
+					pendingRollback = rollbackMark;
+					rollbackMark = null;
+				}
+				const suspendedNow = state.keepAlive;
+				ctx.ui.notify(
+					suspendedNow
+						? "watchdog: AI 已调用 stop_watchdog，常驻监控挂起（下次发消息自动恢复）"
+						: "watchdog: AI 已调用 stop_watchdog，监控已停止（回合结束）",
+					"info",
+				);
+				// 模拟用户按 ESC（app.interrupt）：stop_watchdog 之后 AI 通常只剩收尾文字或多余动作，
+				// 直接中止当前回合，强行截断 LLM 的后续回复。与 ESC 走同一路径（agent.abort()）。
+				if (!ctx.isIdle()) ctx.abort();
 				return {
 					content: [
 						{
 							type: "text",
-							text: state.suspended
-								? "Already suspended. Nothing to do — end your turn normally."
-								: 'Watchdog is not running. Only call this after a "[Automated, not user input]" nudge.',
+							text: "OK.",
 						},
 					],
 					details: {},
 				};
-			}
-			teardown(ctx, false);
-			// 记录待回滚标记：agent_settled 后经内部命令砸尾，把 nudge 交换从上下文移除
-			if (rollbackMark) {
-				pendingRollback = rollbackMark;
-				rollbackMark = null;
-			}
-			const suspendedNow = state.keepAlive;
-			ctx.ui.notify(
-				suspendedNow
-					? "watchdog: AI 已调用 stop_watchdog，常驻监控挂起（下次发消息自动恢复）"
-					: "watchdog: AI 已调用 stop_watchdog，监控已停止（回合结束）",
-				"info",
-			);
-			// 模拟用户按 ESC（app.interrupt）：stop_watchdog 之后 AI 通常只剩收尾文字或多余动作，
-			// 直接中止当前回合，强行截断 LLM 的后续回复。与 ESC 走同一路径（agent.abort()）。
-			if (!ctx.isIdle()) ctx.abort();
-			return {
-				content: [
-					{
-						type: "text",
-						text: "OK.",
-					},
-				],
-				details: {},
-			};
-		},
-	});
+			},
+		});
+	}
 
 	// ---------- 用户命令 ----------
 

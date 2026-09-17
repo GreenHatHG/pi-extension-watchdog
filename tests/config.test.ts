@@ -7,10 +7,12 @@ beforeEach(() => {
 	vi.resetModules();
 });
 
-it("注册了 stop_watchdog 工具、/watchdog 命令，且工具默认激活", async () => {
+it("加载时不注册工具，首次启动监控后才注册且默认激活", async () => {
 	const rt = await setup();
-	expect(rt.tools.has("stop_watchdog")).toBe(true);
+	expect(rt.tools.has("stop_watchdog")).toBe(false); // 懒注册：未启用监控的会话不占 tools 名额
 	expect(rt.commands.has("watchdog")).toBe(true);
+	await rt.commands.get("watchdog").handler("timeout=60", rt.ctx);
+	expect(rt.tools.has("stop_watchdog")).toBe(true);
 	expect(rt.activeTools.has("stop_watchdog")).toBe(true);
 });
 

@@ -28,6 +28,9 @@ it("AI 调用 stop_watchdog（once 模式）→ 彻底停止，工具常驻不�
 
 it("未运行时调用 stop_watchdog 返回无需停止", async () => {
 	const rt = await setup();
+	// 懒注册：先启动再彻底停止，工具留在注册表但监控未运行
+	await rt.commands.get("watchdog").handler("timeout=60", rt.ctx);
+	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 	const result = await rt.tools.get("stop_watchdog").execute("t0", {}, undefined, undefined, rt.ctx);
 	expect(JSON.stringify(result.content)).toContain("not running");
 });
