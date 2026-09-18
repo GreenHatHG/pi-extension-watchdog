@@ -149,7 +149,7 @@ cp index.ts ~/.pi/agent/extensions/watchdog.ts
 mkdir -p .pi/extensions && cp index.ts .pi/extensions/watchdog.ts
 ```
 
-在 pi 中用 `/reload` 热加载（不用重启 pi 就能让插件生效）。运行测试：`npm test`（vitest；开发时用 `npm run test:watch` 自动重跑）。
+在 pi 中用 `/reload` 热加载（不用重启 pi 就能让插件生效）。运行测试：`pnpm test`（vitest；开发时用 `pnpm run test:watch` 自动重跑）。
 
 ## 上下文回滚（可选）
 

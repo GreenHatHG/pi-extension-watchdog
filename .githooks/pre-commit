@@ -1,16 +1,17 @@
 #!/bin/sh
 # pre-commit：检查本次暂存的文件，自动修复可安全修复的问题后重新暂存
 set -e
+set -o pipefail # 管道退出码取 vitest/biome 而非 tail，否则测试失败拦截不住 commit
 npx biome check --no-errors-on-unmatched --staged --write || {
-	echo "biome check 存在无法自动修复的问题，commit 被拦截。运行 npm run format 后重试。"
+	echo "biome check 存在无法自动修复的问题，commit 被拦截。运行 pnpm run format 后重试。"
 	exit 1
 }
 changed=$(git diff --name-only)
 [ -n "$changed" ] && git add $changed
 
 # 测试：快速验证，拦截破坏性提交
-npm test 2>&1 | tail -3 || {
-	echo "vitest 失败，commit 被拦截。运行 npm test 查看详情。"
+pnpm test 2>&1 | tail -3 || {
+	echo "vitest 失败，commit 被拦截。运行 pnpm test 查看详情。"
 	exit 1
 }
 exit 0

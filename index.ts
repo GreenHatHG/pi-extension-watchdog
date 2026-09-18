@@ -678,7 +678,7 @@ export default function (pi: ExtensionAPI) {
 					const cfg = config.ok ? config : undefined;
 					if (args.trim() && !config.ok) {
 						ctx.ui.notify(
-							`watchdog: ${config.error}。用法：/watchdog [timeout=秒] [max=次数] [message=文案] [mode=once|keep]，例如 /watchdog timeout=30 message=继续 mode=keep`,
+							`watchdog: 参数无效（${config.error}）。用法：/watchdog [timeout=秒] [max=次数] [message=文案] [mode=once|keep]，例如 /watchdog timeout=30 message=继续 mode=keep`,
 							"warning",
 						);
 						break;
