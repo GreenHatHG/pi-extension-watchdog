@@ -670,8 +670,10 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// ---------- 内部回滚命令 ----------
-	// 隐藏命令（无 description，不进补全列表）：唯一调用方是 agent_settled 里的
-	// sendUserMessage 跳板，作用是把命令专属的 command ctx（含 navigateTree）带进扩展。
+	// 内部命令：唯一调用方是 agent_settled 里的 sendUserMessage 跳板，作用是把命令
+	// 专属的 command ctx（含 navigateTree）带进扩展。pi 没有按命令隐藏/注销的 API
+	//（补全列表全量生成，与有无 description 无关），因此它会出现在 / 补全里；
+	// 无待回滚任务时调用是空操作。
 	pi.registerCommand("watchdog-internal", {
 		handler: async (args, cmdCtx) => {
 			const pr = pendingRollback;
