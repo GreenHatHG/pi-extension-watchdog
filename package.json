@@ -1,18 +1,43 @@
 {
-	"name": "pi-watchdog",
+	"name": "pi-extension-watchdog",
 	"version": "1.0.0",
 	"description": "pi 插件：自动继续监控。AI 停下后自动替你催它继续，直到任务真正完成——你不用守着手动敲「继续」。",
 	"main": "index.ts",
+	"keywords": [
+		"pi-package",
+		"pi",
+		"pi-extension",
+		"watchdog",
+		"coding-agent",
+		"ai",
+		"llm"
+	],
+	"author": "GreenHatHG <greenhat2333@gmail.com>",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/GreenHatHG/pi-extension-watchdog.git"
+	},
+	"files": [
+		"index.ts",
+		"README.md",
+		"LICENSE"
+	],
+	"pi": {
+		"extensions": [
+			"./index.ts"
+		]
+	},
 	"dependencies": {
-		"jiti": "^2.7.0",
-		"typebox": "^1.3.7",
-		"typescript": "^7.0.2",
-		"undici-types": "^8.3.0"
+		"typebox": "^1.3.7"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.5.14",
-		"@earendil-works/pi-coding-agent": "^0.85.1",
 		"@types/node": "^22.20.3",
+		"typescript": "^7.0.2",
 		"vitest": "^5.0.1"
 	},
 	"scripts": {
@@ -21,12 +46,8 @@
 		"check:biome": "biome check .",
 		"test": "vitest run",
 		"test:watch": "vitest",
-		"typecheck": "tsc --noEmit",
-		"prepare": "git config core.hooksPath .githooks"
+		"typecheck": "tsc --noEmit"
 	},
-	"keywords": [],
-	"author": "",
-	"license": "ISC",
 	"type": "commonjs",
 	"packageManager": "pnpm@12.4.2"
 }

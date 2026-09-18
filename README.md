@@ -1,4 +1,4 @@
-# pi-watchdog
+# pi-extension-watchdog
 
 pi 插件：自动继续监控。AI 停下后自动替你催它继续，直到任务真正完成——你不用守着手动敲「继续」。
 
@@ -141,6 +141,23 @@ pi.registerTool({
 
 ## 安装
 
+推荐通过 pi 的包管理安装（会自动进入 [pi.dev/packages](https://pi.dev/packages) 包画廊索引）：
+
+```bash
+# npm 渠道
+pi install npm:pi-extension-watchdog
+
+# 或 git 渠道（锚定 tag，pi 会自动装依赖）
+pi install git:github.com/GreenHatHG/pi-extension-watchdog@v1.0.0
+
+# 不安装、临时体验当前目录的包
+pi -e .
+```
+
+装完在 pi 里用 `/reload` 热加载（不用重启 pi 就能让插件生效）。已安装的包可用 `pi list` 查看、`pi remove npm:pi-extension-watchdog` 卸载。
+
+不想装包管理，也可以手动拷贝单文件：
+
 ```bash
 # 全局：所有项目生效
 cp index.ts ~/.pi/agent/extensions/watchdog.ts
@@ -149,7 +166,7 @@ cp index.ts ~/.pi/agent/extensions/watchdog.ts
 mkdir -p .pi/extensions && cp index.ts .pi/extensions/watchdog.ts
 ```
 
-在 pi 中用 `/reload` 热加载（不用重启 pi 就能让插件生效）。运行测试：`pnpm test`（vitest；开发时用 `pnpm run test:watch` 自动重跑）。
+本地开发：`pnpm test`（vitest；开发时用 `pnpm run test:watch` 自动重跑），`pnpm typecheck` 检查类型。
 
 ## 上下文回滚（可选）
 
