@@ -202,3 +202,15 @@ mkdir -p .pi/extensions && cp index.ts .pi/extensions/watchdog.ts
 
 失败处理：发送失败则保留标记，下个回合结束后重试；校验不通过或删除失败则放弃，催促交换留在上下文里——只是多占些空间，不影响正确性。
 
+## 项目支持
+
+<table>
+<tbody>
+<tr>
+<td align="center" width="33%">
+<a href="https://linux.do"><img src="https://cdn3.ldstatic.com/original/4X/d/1/4/d146c68151340881c884d95e0da4acdf369258c6.png" alt="LINUX DO" width="120"></a>
+<br><sub>社区支持</sub>
+</td>
+</tr>
+</tbody>
+</table>
