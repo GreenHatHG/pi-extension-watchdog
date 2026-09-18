@@ -112,6 +112,15 @@ function isRollbackEnvEnabled(): boolean {
 }
 
 /**
+ * 会话是否来自「恢复」而非全新开始：/resume 换会话（resume）、/fork / /clone 恢复旧树点（fork）。
+ * 恢复进来的会话虽有历史消息，但本进程实例里 AI 还没干过活，立即倒计时会在用户
+ * 只是想翻看旧会话时空催一轮——与「空会话等首次 agent_settled」同一原则。
+ */
+function isRestoredReason(reason: string | undefined): boolean {
+	return reason === "resume" || reason === "fork";
+}
+
+/**
  * 校验回滚点之后是否只有本次催促的 stop 交换（纯尾巴）。
  * 只允许删后缀：中段删除会位移后续字节打爆 prompt cache，
  * 且会产生未配对的 tool_use。发现任何非催促交换的内容（真活）都返回 false。
@@ -428,6 +437,7 @@ export default function (pi: ExtensionAPI) {
 		message: string,
 		maxNudges?: number,
 		keepAlive = false,
+		restored = false,
 	) {
 		// 首次启动才注册工具：未启用监控的会话里工具定义不进请求，不占 token；
 		// 注册后常驻不移出，中途不再变更 tools 列表（保缓存前缀稳定）
@@ -448,14 +458,16 @@ export default function (pi: ExtensionAPI) {
 		ensureTerminalInputListener(ctx);
 
 		// 若当前已空闲则考虑立即开始倒计时；否则等 agent_settled。
-		// 首次启动且会话中还没有任何消息时不倒计时（AI 还没开始干活，催促无意义），
-		// 等第一轮 agent_settled 后再开始。
+		// 启动时会话还没有本实例的消息时不倒计时（AI 还没开始干活，催促无意义），
+		// 等第一轮 agent_settled 后再开始；恢复的会话（resume/fork）同理：历史消息不算活，
+		// 用户没有别的操作就不开定时器，等 AI 真跑过一轮再说。
 		if (ctx.isIdle()) {
-			if (hasMessages(ctx)) {
+			if (hasMessages(ctx) && !restored) {
 				armCountdown(ctx);
 			} else {
 				renderStatus(ctx);
-				ctx.ui.notify("watchdog: 会话暂无消息，将在 AI 首次运行结束后开始倒计时", "info");
+				const why = restored ? "恢复的会话，等待实际操作" : "会话暂无消息";
+				ctx.ui.notify(`watchdog: ${why}，将在 AI 首次运行结束后开始倒计时`, "info");
 			}
 		} else {
 			renderStatus(ctx);
@@ -469,7 +481,7 @@ export default function (pi: ExtensionAPI) {
 
 	// ---------- 事件 ----------
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", async (event, ctx) => {
 		rollbackEnabled = isRollbackEnvEnabled(); // 会话重载/切换时重新读取
 		const envConfig = parseEnvConfig();
 		if (envConfig?.ok && !state.running) {
@@ -481,6 +493,7 @@ export default function (pi: ExtensionAPI) {
 				envConfig.message ?? "", // 只传追加指令；触发行固定，语义不随自定义内容丢失
 				envConfig.maxNudges,
 				envConfig.keepAlive,
+				isRestoredReason(event.reason), // 恢复的会话（/resume、/fork）不立即倒计时，等首次 agent_settled
 			);
 		} else {
 			// 环境变量设了但解析失败：明确提示具体原因，而不是静默不启动
