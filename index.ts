@@ -28,16 +28,16 @@ const STATUS_KEY = "watchdog";
  *   max=次数        最多催 N 次
  *   message=文案    追加指令（=后可含空格，后续所有 token 都算文案）；作为 Task instruction 拼在固定触发行之后，不替换触发行
  *   mode=once|keep  once 默认；keep 常驻（stop_watchdog 仅挂起，新消息自动恢复）
- * 出现非法 token（缺少 = 、未知 key、非法值）返回 null，由调用方提示用法。
- */
-function parseConfig(raw: string): {
-	timeoutSeconds: number;
-	maxNudges?: number;
-	message?: string;
-	keepAlive: boolean;
-} | null {
+ * 非法 token（缺少 = 、未知 key、非法值）返回 ok=false，error 已含 token 与原因，调用方原样 notify。 */
+export type ParsedConfig =
+	| { ok: true; timeoutSeconds: number; maxNudges?: number; message?: string; keepAlive: boolean }
+	| { ok: false; error: string };
+
+const KNOWN_KEYS = "timeout/max/message/mode";
+
+export function parseConfig(raw: string): ParsedConfig {
 	const tokens = raw.trim().split(/\s+/).filter(Boolean);
-	if (tokens.length === 0) return null;
+	if (tokens.length === 0) return { ok: true, timeoutSeconds: DEFAULT_TIMEOUT_SECONDS, keepAlive: false };
 	let timeoutSeconds = DEFAULT_TIMEOUT_SECONDS;
 	let maxNudges: number | undefined;
 	let keepAlive = false;
@@ -45,27 +45,27 @@ function parseConfig(raw: string): {
 	for (let i = 0; i < tokens.length; i++) {
 		const token = tokens[i];
 		const eq = token.indexOf("=");
-		if (eq <= 0) return null; // 只接受 key=value
+		if (eq <= 0) return { ok: false, error: `无法识别的参数 "${token}"（只接受 key=value 形式，支持 ${KNOWN_KEYS}）` };
 		const key = token.slice(0, eq);
 		const value = token.slice(eq + 1);
 		if (key === "timeout") {
-			if (!/^\d+$/.test(value)) return null;
+			if (!/^\d+$/.test(value)) return { ok: false, error: `timeout 值 "${value}" 不是正整数，例如 timeout=30` };
 			timeoutSeconds = Math.max(1, parseInt(value, 10));
 		} else if (key === "max") {
-			if (!/^\d+$/.test(value)) return null;
+			if (!/^\d+$/.test(value)) return { ok: false, error: `max 值 "${value}" 不是正整数，例如 max=5` };
 			maxNudges = Math.max(1, parseInt(value, 10));
 		} else if (key === "mode") {
-			if (value !== "once" && value !== "keep") return null;
+			if (value !== "once" && value !== "keep") return { ok: false, error: `mode 值 "${value}" 只能是 once 或 keep` };
 			keepAlive = value === "keep";
 		} else if (key === "message") {
 			const joined = [value, ...tokens.slice(i + 1)].filter(Boolean).join(" ").trim();
 			message = joined || undefined;
 			break;
 		} else {
-			return null; // 未知 key
+			return { ok: false, error: `未知参数 "${key}"（只支持 ${KNOWN_KEYS}）` };
 		}
 	}
-	return { timeoutSeconds, maxNudges, message, keepAlive };
+	return { ok: true, timeoutSeconds, maxNudges, message, keepAlive };
 }
 
 /**
@@ -76,11 +76,10 @@ function parseConfig(raw: string): {
  *   PI_WATCHDOG="timeout=30 max=100"           空闲 30s，最多催 100 次
  *   PI_WATCHDOG="timeout=5 mode=keep"          常驻模式（stop_watchdog 仅挂起）
  */
-function parseEnvConfig(): ReturnType<typeof parseConfig> {
+function parseEnvConfig(): ParsedConfig | null {
 	const raw = process.env.PI_WATCHDOG?.trim();
 	if (!raw || raw === "0" || raw === "false") return null;
-	if (raw === "1" || raw === "true")
-		return parseConfig("") ?? { timeoutSeconds: DEFAULT_TIMEOUT_SECONDS, keepAlive: false };
+	if (raw === "1" || raw === "true") return parseConfig("");
 	return parseConfig(raw);
 }
 
@@ -473,7 +472,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		rollbackEnabled = isRollbackEnvEnabled(); // 会话重载/切换时重新读取
 		const envConfig = parseEnvConfig();
-		if (envConfig && !state.running) {
+		if (envConfig?.ok && !state.running) {
 			// env 启动与手动命令同走 startWatchdog；回滚能力由内部命令跳板提供，
 			// 不依赖启动路径，因此无需借命令自举
 			startWatchdog(
@@ -484,13 +483,16 @@ export default function (pi: ExtensionAPI) {
 				envConfig.keepAlive,
 			);
 		} else {
-			// 环境变量设了但解析失败：明确提示，而不是静默不启动
+			// 环境变量设了但解析失败：明确提示具体原因，而不是静默不启动
 			const raw = process.env.PI_WATCHDOG?.trim();
-			if (raw && raw !== "0" && raw !== "false" && raw !== "1" && raw !== "true" && parseConfig(raw) === null) {
-				ctx.ui.notify(
-					'watchdog: PI_WATCHDOG 格式无效，未自动启动。用法：PI_WATCHDOG="timeout=30 max=100 message=继续 mode=keep"',
-					"warning",
-				);
+			if (raw && raw !== "0" && raw !== "false" && raw !== "1" && raw !== "true") {
+				const r = parseConfig(raw);
+				if (!r.ok) {
+					ctx.ui.notify(
+						`watchdog: PI_WATCHDOG 格式无效（${r.error}），未自动启动。用法：PI_WATCHDOG="timeout=30 max=100 message=继续 mode=keep"`,
+						"warning",
+					);
+				}
 			}
 		}
 	});
@@ -660,19 +662,20 @@ export default function (pi: ExtensionAPI) {
 					// 启动：/watchdog [timeout=秒] [max=次数] [message=文案] [mode=once|keep]
 					// 与环境变量共用同一解析器，严格 key=value，非法参数提示用法而非静默当文案
 					const config = parseConfig(args);
-					if (args.trim() && config === null) {
+					const cfg = config.ok ? config : undefined;
+					if (args.trim() && !config.ok) {
 						ctx.ui.notify(
-							"watchdog: 参数无效。用法：/watchdog [timeout=秒] [max=次数] [message=文案] [mode=once|keep]，例如 /watchdog timeout=30 message=继续 mode=keep",
+							`watchdog: ${config.error}。用法：/watchdog [timeout=秒] [max=次数] [message=文案] [mode=once|keep]，例如 /watchdog timeout=30 message=继续 mode=keep`,
 							"warning",
 						);
 						break;
 					}
 					startWatchdog(
 						ctx,
-						config?.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,
-						config?.message ?? "", // 追加指令；未指定时为空，不沿用上一次的（避免隐式状态残留）
-						config?.maxNudges,
-						config?.keepAlive ?? false,
+						cfg?.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,
+						cfg?.message ?? "", // 追加指令；未指定时为空，不沿用上一次的（避免隐式状态残留）
+						cfg?.maxNudges,
+						cfg?.keepAlive ?? false,
 					);
 					break;
 				}
@@ -681,10 +684,8 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// ---------- 内部回滚命令 ----------
-	// 内部命令：唯一调用方是 agent_settled 里的 sendUserMessage 跳板，作用是把命令
-	// 专属的 command ctx（含 navigateTree）带进扩展。pi 没有按命令隐藏/注销的 API
-	//（补全列表全量生成，与有无 description 无关），因此它会出现在 / 补全里；
-	// 无待回滚任务时调用是空操作。
+	// 隐藏命令（无 description，不进补全列表）：唯一调用方是 agent_settled 里的
+	// sendUserMessage 跳板，作用是把命令专属的 command ctx（含 navigateTree）带进扩展。
 	pi.registerCommand("watchdog-internal", {
 		handler: async (args, cmdCtx) => {
 			const pr = pendingRollback;
