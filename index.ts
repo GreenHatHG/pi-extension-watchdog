@@ -510,13 +510,24 @@ export default function (pi: ExtensionAPI) {
 		// 注意放在 running 检查之前：stop 后 running 已是 false。
 		// 不在此处消费 pendingRollback，由 watchdog-internal 命令统一消费。
 		if (pendingRollback) {
-			try {
-				await (pi.sendUserMessage as any)(`/watchdog-internal op=rollback target=${pendingRollback.leafId}`, {
+			// stop_watchdog 内部会 ctx.abort() 截断回合，紧随其后的 settled 可能仍处于
+			// abort 窗口内，此时 sendUserMessage 会抛 "This operation was aborted"。
+			// 先直接尝试（abort 通常已落地）；命中窗口则等 300ms 重试一次，
+			// 再失败就显式提示——stop 后不会再有 settled 来重试，静默滞留等于回滚丢失。
+			const target = pendingRollback.leafId;
+			const sendJump = () =>
+				(pi.sendUserMessage as any)(`/watchdog-internal op=rollback target=${target}`, {
 					expandPromptTemplates: true,
 				});
-			} catch {
-				// 发送失败则保留现状（下次 settled 重试；校验不过则自动放弃）
-			}
+			sendJump().catch(async () => {
+				await new Promise((r) => setTimeout(r, 300));
+				sendJump().catch((err: unknown) => {
+					activeCtx?.ui.notify(
+						`watchdog: 回滚跳板命令发送失败，催促交换留在上下文中（${err instanceof Error ? err.message : String(err)}）`,
+						"warning",
+					);
+				});
+			});
 		}
 		if (!state.running) return;
 		activeCtx = ctx;
