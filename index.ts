@@ -198,7 +198,13 @@ export default function (pi: ExtensionAPI) {
 	/** 最近一次催促发送前的 leaf id + 催促全文，供 stop 后回滚校验 */
 	let rollbackMark: { leafId: string; nudgeFullText: string } | null = null;
 	/** 待执行的上下文回滚：stop_watchdog 调用后，把 nudge 交换从会话尾部砍掉 */
-	let pendingRollback: { leafId: string; nudgeFullText: string } | null = null;
+	let pendingRollback: { leafId: string; nudgeFullText: string; attempts: number; lastError?: string } | null = null;
+
+	/** 截断错误文本，保证 notify 单行不超过终端宽度 */
+	function truncateError(err: unknown, max = 80): string {
+		const msg = err instanceof Error ? err.message : String(err);
+		return msg.length > max ? `${msg.slice(0, max - 1)}…` : msg;
+	}
 
 	function clearCountdown() {
 		if (state.timer) {
@@ -519,31 +525,59 @@ export default function (pi: ExtensionAPI) {
 		renderStatus(ctx);
 	});
 
+	// 回滚跳板：把 /watchdog-internal 命令经 pi.sendUserMessage 送进命令管线，
+	// 借命令 ctx 拿到 navigateTree。注意扩展 API 的 pi.sendUserMessage 是
+	// fire-and-forget：返回 undefined（AgentSession.sendUserMessage 才返回 Promise），
+	// 底层失败（如 stop 后 abort 窗口内的 "This operation was aborted"）只会经
+	// emitError 打到界面上，扩展侧拿不到 rejection，无法 .catch() 观察失败。
+	// 因此以 watchdog-internal 命令是否消费掉 pendingRollback 作为"发送成功"回执：
+	// 超时未消费就重发；命令侧一次性消费，重复发送只会空跑，安全。
+	function sendRollbackJump() {
+		const pr = pendingRollback;
+		if (!pr) return;
+		if (activeCtx && !activeCtx.isIdle()) {
+			// stop_watchdog 的 ctx.abort() 窗口内发送会被吞（"This operation was aborted"），
+			// 等回合真正结束后再发（等待不计次数，上限由重试链兜底）
+			setTimeout(() => sendRollbackJump(), 200);
+			return;
+		}
+		try {
+			(pi.sendUserMessage as any)(`/watchdog-internal op=rollback target=${pr.leafId}`, {
+				expandPromptTemplates: true,
+			});
+		} catch (err) {
+			// 同步抛出：记录真实错误，最终告警时截断展示
+			pr.lastError = err instanceof Error ? err.message : String(err);
+		}
+		pr.attempts += 1;
+		setTimeout(() => retryRollbackJump(pr), 300 * pr.attempts); // 递增退避：300ms → 600ms → 1200ms
+	}
+
+	function retryRollbackJump(pr: NonNullable<typeof pendingRollback>) {
+		if (pendingRollback !== pr) return; // 命令已消费（或会话关闭已清理），跳板完成使命
+		if (pr.attempts >= 3) {
+			// 异步 rejection 由 runtime 吞掉并打横幅，扩展侧拿不到；
+			// 未捕获到同步错误时，标注最可能的已知原因，截断后展示
+			const cause = pr.lastError
+				? truncateError(pr.lastError)
+				: "This operation was aborted（abort 窗口内 rejection 被 runtime 吞掉）";
+			activeCtx?.ui.notify(`watchdog: 回滚跳板发送失败(×${pr.attempts})，催促交换留在上下文（${cause}）`, "warning");
+			return;
+		}
+		if (activeCtx && !activeCtx.isIdle()) {
+			// 有回合在跑：可能是上一次发送已落地，等它结束再决定是否重发
+			setTimeout(() => retryRollbackJump(pr), 600);
+			return;
+		}
+		sendRollbackJump();
+	}
+
 	pi.on("agent_settled", async (_event, ctx) => {
 		// stop_watchdog 刚被调用：把本次 nudge 交换从上下文砸尾回滚。
 		// 通过内部命令跳板拿到 command ctx（只有命令 handler 才有 navigateTree）。
 		// 注意放在 running 检查之前：stop 后 running 已是 false。
 		// 不在此处消费 pendingRollback，由 watchdog-internal 命令统一消费。
-		if (pendingRollback) {
-			// stop_watchdog 内部会 ctx.abort() 截断回合，紧随其后的 settled 可能仍处于
-			// abort 窗口内，此时 sendUserMessage 会抛 "This operation was aborted"。
-			// 先直接尝试（abort 通常已落地）；命中窗口则等 300ms 重试一次，
-			// 再失败就显式提示——stop 后不会再有 settled 来重试，静默滞留等于回滚丢失。
-			const target = pendingRollback.leafId;
-			const sendJump = () =>
-				(pi.sendUserMessage as any)(`/watchdog-internal op=rollback target=${target}`, {
-					expandPromptTemplates: true,
-				});
-			sendJump().catch(async () => {
-				await new Promise((r) => setTimeout(r, 300));
-				sendJump().catch((err: unknown) => {
-					activeCtx?.ui.notify(
-						`watchdog: 回滚跳板命令发送失败，催促交换留在上下文中（${err instanceof Error ? err.message : String(err)}）`,
-						"warning",
-					);
-				});
-			});
-		}
+		if (pendingRollback) sendRollbackJump();
 		if (!state.running) return;
 		activeCtx = ctx;
 		armCountdown(ctx); // AI 停止输出（含重试/排队都结束后），重新倒计时
@@ -588,7 +622,7 @@ export default function (pi: ExtensionAPI) {
 				teardown(ctx, false);
 				// 记录待回滚标记：agent_settled 后经内部命令砸尾，把 nudge 交换从上下文移除
 				if (rollbackMark) {
-					pendingRollback = rollbackMark;
+					pendingRollback = { ...rollbackMark, attempts: 0 };
 					rollbackMark = null;
 				}
 				const suspendedNow = state.keepAlive;
