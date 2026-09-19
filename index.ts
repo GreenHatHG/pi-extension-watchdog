@@ -556,12 +556,19 @@ export default function (pi: ExtensionAPI) {
 	function retryRollbackJump(pr: NonNullable<typeof pendingRollback>) {
 		if (pendingRollback !== pr) return; // 命令已消费（或会话关闭已清理），跳板完成使命
 		if (pr.attempts >= 3) {
+			// 彻底放弃本次回滚：不清掉的话残留目标会在之后每个 agent_settled
+			// 反复重发跳板（且 attempts 已超限，每轮都会再告警一次）。
+			// 放弃的后果是良性的：催促交换留在上下文，不影响正确性。
+			pendingRollback = null;
 			// 异步 rejection 由 runtime 吞掉并打横幅，扩展侧拿不到；
 			// 未捕获到同步错误时，标注最可能的已知原因，截断后展示
 			const cause = pr.lastError
 				? truncateError(pr.lastError)
 				: "This operation was aborted（abort 窗口内 rejection 被 runtime 吞掉）";
-			activeCtx?.ui.notify(`watchdog: 回滚跳板发送失败(×${pr.attempts})，催促交换留在上下文（${cause}）`, "warning");
+			activeCtx?.ui.notify(
+				`watchdog: 连发 3 次回滚请求都没成功，本次不回滚了。刚才那轮“催促 AI 继续干活”的对话会留在会话记录里，不影响使用。（原因：${cause}）`,
+				"warning",
+			);
 			return;
 		}
 		if (activeCtx && !activeCtx.isIdle()) {
@@ -741,12 +748,27 @@ export default function (pi: ExtensionAPI) {
 			const target = /(?:^|\s)target=(\S+)/.exec(args)?.[1];
 			if (!target || target !== pr.leafId) return; // 参数不匹配（防误调）
 			const sm: any = cmdCtx.sessionManager;
-			if (!validateRollbackTail(sm, target, pr.nudgeFullText)) return; // 尾部有真活，放弃
+			if (!validateRollbackTail(sm, target, pr.nudgeFullText)) {
+				// 尾部有真活，放弃回滚并明示原因（否则静默失败无从排查）
+				cmdCtx.ui.notify(
+					"watchdog: 没有回滚：停止之后会话里又出现了新的真实对话内容（不是刚才那轮催促），删掉会连带删掉它们。",
+					"warning",
+				);
+				return;
+			}
 			try {
 				await (cmdCtx as any).navigateTree(target, { summarize: false });
-				cmdCtx.ui.notify("watchdog: 已回滚本次催促交换（上下文恢复到催促前）", "info");
-			} catch {
-				// navigateTree 失败则保留现状（nudge 交换留在上下文，不影响正确性）
+				cmdCtx.ui.notify(
+					"watchdog: 已回滚：把刚才那轮“催促 AI 继续干活”的对话从会话记录里删掉了，上下文回到催促前。",
+					"info",
+				);
+			} catch (err) {
+				// navigateTree 失败则保留现状（nudge 交换留在上下文，不影响正确性），但要可见
+				const msg = err instanceof Error ? err.message : String(err);
+				cmdCtx.ui.notify(
+					`watchdog: 没有回滚：切回之前的会话位置时出错（${msg}）。刚才那轮“催促 AI 继续干活”的对话会留在会话记录里，不影响使用。`,
+					"warning",
+				);
 			}
 		},
 	});
