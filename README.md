@@ -215,6 +215,10 @@ mkdir -p .pi/extensions && cp index.ts .pi/extensions/watchdog.ts
 
 失败处理：发送失败则保留标记，下个回合结束后重试；校验不通过或删除失败则放弃，催促交换留在上下文里——只是多占些空间，不影响正确性。
 
+## 更新日志
+
+参见 [CHANGELOG.md](./CHANGELOG.md)。
+
 ## 项目支持
 
 <table>
