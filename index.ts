@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
@@ -75,6 +76,7 @@ export function parseConfig(raw: string): ParsedConfig {
  *   PI_WATCHDOG=0 / false            不启动
  *   PI_WATCHDOG="timeout=30 max=100"           空闲 30s，最多催 100 次
  *   PI_WATCHDOG="timeout=5 mode=keep"          常驻模式（stop_watchdog 仅挂起）
+ *   PI_WATCHDOG_ON_STOP="<shell命令>"          stop_watchdog 被调用时执行的钩子（如写 exit 文件、tmux wait-for -S 发完成信号）
  */
 function parseEnvConfig(): ParsedConfig | null {
 	const raw = process.env.PI_WATCHDOG?.trim();
@@ -625,6 +627,12 @@ export default function (pi: ExtensionAPI) {
 						],
 						details: {},
 					};
+				}
+				// PI_WATCHDOG_ON_STOP 钩子：stop_watchdog 被调用时执行外部命令（写 exit 文件、
+				// 发 tmux wait-for -S done 等完成信号），供父进程（如 subagent 扩展）等待子 agent 结束。
+				const onStop = process.env.PI_WATCHDOG_ON_STOP?.trim();
+				if (onStop) {
+					spawn("sh", ["-c", onStop], { stdio: "ignore", detached: true }).unref();
 				}
 				teardown(ctx, false);
 				// 记录待回滚标记：agent_settled 后经内部命令砸尾，把 nudge 交换从上下文移除

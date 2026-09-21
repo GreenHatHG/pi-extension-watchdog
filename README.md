@@ -64,6 +64,19 @@ PI_WATCHDOG="timeout=30 max=100" tmux new-session -d -s work pi
 
 环境变量随子进程继承，tmux/脚本里启动的 pi 都会生效。格式非法时会明确提示且不启动监控，不会静默失效。
 
+### 完成信号：PI_WATCHDOG_ON_STOP
+
+父进程往往需要知道 sub-agent 何时干完了活。设置 `PI_WATCHDOG_ON_STOP` 后，AI 调用 `stop_watchdog` 时会执行该 shell 命令（`sh -c`，非阻塞，进程分离）：
+
+```bash
+# 例：写 exit 码文件并通知 tmux 等待方
+PI_WATCHDOG="timeout=5 mode=keep" \
+PI_WATCHDOG_ON_STOP="echo 0 > /tmp/pw-exit && tmux -L pi-sub wait-for -S done" \
+  tmux new-session -d -s work pi
+```
+
+注意：`mode=keep` 下 stop_watchdog 只是挂起监控（新消息可恢复），钩子仍会在挂起动作本身时触发一次。
+
 ## 命令一览
 
 ```
