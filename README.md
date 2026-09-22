@@ -170,8 +170,11 @@ pi.registerTool({
 # npm 渠道
 pi install npm:pi-extension-watchdog
 
-# 或 git 渠道（锚定 tag，pi 会自动装依赖）
-pi install git:github.com/GreenHatHG/pi-extension-watchdog@v1.0.0
+# 或 git 渠道（pi 会自动装依赖；默认跟踪默认分支，pi update 时随之更新）
+pi install git:github.com/GreenHatHG/pi-extension-watchdog
+
+# 想锁定版本也可以锚定 tag（之后需手动 pi install <...>@新tag 才会升级）
+pi install git:github.com/GreenHatHG/pi-extension-watchdog@v1.1.0
 
 # 不安装、临时体验当前目录的包
 pi -e .
