@@ -1,6 +1,6 @@
 {
 	"name": "pi-extension-watchdog",
-	"version": "1.1.0",
+	"version": "1.1.1",
 	"description": "pi 插件：自动继续监控。AI 停下后自动替你催它继续，直到任务真正完成——你不用守着手动敲「继续」。",
 	"main": "index.ts",
 	"keywords": [

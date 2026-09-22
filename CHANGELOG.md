@@ -2,6 +2,12 @@
 
 本项目的所有显著变更都记录在此文件中。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## 1.1.1 - 2026-09-21
+
+### 文档
+
+- README 安装说明不再写死 git tag：推荐命令改为跟踪默认分支，`pi update` 即可升级；另附锚定 `v1.1.0` tag 的锁定版本写法。
+
 ## 1.1.0 - 2026-09-21
 
 ### 新增
