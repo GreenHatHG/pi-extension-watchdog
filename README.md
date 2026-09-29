@@ -91,10 +91,18 @@ PI_WATCHDOG_ON_STOP="echo 0 > /tmp/pw-exit && tmux -L pi-sub wait-for -S done" \
 
 AI 停止输出、进入空闲后开始倒计时；倒计时期间 AI 再次运行（或你发消息、正在输入、正在按键操作）则自动暂停/取消；倒计时归零仍空闲，就以你的名义发一条催促消息，触发新一轮。如此循环，直到你或 AI 主动停止。
 
+### 跨扩展状态同步
+
+`agent_settled` 只表示 Pi 当前一轮结束，无法表达 watchdog 倒计时后还会继续发消息。为让 tab 标题、通知等状态集成避免提前显示“完成”，watchdog 会通过 Pi 的共享事件总线发布生命周期真值：
+
+- `watchdog:state`：状态变化时广播；消费方以载荷中的 `running` 判断 watchdog 是否仍会续跑。
+- `watchdog:state:query`：消费方在启动或 reload 后查询；watchdog 会立即重新广播当前状态，避免依赖扩展加载顺序。
+
+常驻模式下调用 `stop_watchdog` 会发布 `running: false, suspended: true`，表示当前任务已经结束、正在等待下一条真人消息；真人消息恢复监控后重新发布 `running: true`。
+
 催促消息由两部分组成：
 
 - **触发行**：固定文案（`message=` 只追加、不替换本行）：
-
   > [Automated, not user input] If work remains, continue working (no reply needed). If waiting on a user decision, don't change code — state what you need, then call stop_watchdog as your final action. If no work remains and no decision is pending, call stop_watchdog to end the turn.
 
   它按「AI 为什么停下」分三种情况给出对应动作：还有活就继续干（无需回复）；在等用户决策就不改代码，说明需要什么后以 `stop_watchdog` 收尾；没活也没待决策就调 `stop_watchdog` 结束回合。开头的 `[Automated, not user input]` 前缀让 AI 知道这不是真用户发言，不会把它当成新的用户指令。

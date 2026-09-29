@@ -6,6 +6,7 @@ export type Handler = (event: any, ctx: any) => Promise<any>;
 
 export function createMockRuntime() {
 	const handlers = new Map<string, Handler[]>();
+	const eventBusHandlers = new Map<string, Set<(data: unknown) => void>>();
 	const tools = new Map<string, any>();
 	const commands = new Map<string, any>();
 	// 模拟 pi 的 active tools：registerTool 注册的工具默认进入 active 集合
@@ -51,6 +52,16 @@ export function createMockRuntime() {
 	};
 
 	const pi = {
+		events: {
+			on: (name: string, handler: (data: unknown) => void) => {
+				if (!eventBusHandlers.has(name)) eventBusHandlers.set(name, new Set());
+				eventBusHandlers.get(name)!.add(handler);
+				return () => eventBusHandlers.get(name)?.delete(handler);
+			},
+			emit: (name: string, data?: unknown) => {
+				for (const handler of eventBusHandlers.get(name) ?? []) handler(data);
+			},
+		},
 		on: (name: string, handler: Handler) => {
 			if (!handlers.has(name)) handlers.set(name, []);
 			handlers.get(name)!.push(handler);
@@ -171,6 +182,7 @@ export function createMockRuntime() {
 		statusBars,
 		sessionEntries,
 		rollbackCalls,
+		eventBusHandlers,
 	};
 }
 

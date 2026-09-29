@@ -202,6 +202,26 @@ export default function (pi: ExtensionAPI) {
 	/** 待执行的上下文回滚：stop_watchdog 调用后，把 nudge 交换从会话尾部砍掉 */
 	let pendingRollback: { leafId: string; nudgeFullText: string; attempts: number; lastError?: string } | null = null;
 
+	/**
+	 * 向其它扩展发布 watchdog 的生命周期真值。agent_settled 只表示 Pi 当前一轮结束，
+	 * 不能表达 watchdog 稍后还会 sendUserMessage；状态集成应以 running 为准。
+	 */
+	function publishState() {
+		pi.events.emit("watchdog:state", {
+			running: state.running,
+			suspended: state.suspended,
+			keepAlive: state.keepAlive,
+			countdownArmed: state.countdownDeadline != null,
+			paused: state.pausedByInput || state.pausedByActivity,
+			nudgeCount: state.nudgeCount,
+			maxNudges: state.maxNudges,
+			timeoutMs: state.timeoutMs,
+		});
+	}
+
+	// 查询/响应避免依赖扩展加载顺序，也让 /reload 后的消费者拿到当前真值。
+	pi.events.on("watchdog:state:query", publishState);
+
 	/** 截断错误文本，保证 notify 单行不超过终端宽度 */
 	function truncateError(err: unknown, max = 80): string {
 		const msg = err instanceof Error ? err.message : String(err);
@@ -261,7 +281,7 @@ export default function (pi: ExtensionAPI) {
 	 * 且移出 active 集会破坏 prompt cache 前缀）。常驻模式下只临时挂起
 	 * （新用户消息可恢复）；非常驻模式或 explicit=true 时彻底关闭。幂等。
 	 */
-	function teardown(ctx?: ExtensionContext, explicit = true) {
+	function teardown(ctx?: ExtensionContext, explicit = true, publish = true) {
 		const suspend = state.keepAlive && !explicit && state.running;
 		state.running = false;
 		_suspendedStore = suspend;
@@ -282,6 +302,7 @@ export default function (pi: ExtensionAPI) {
 		} else {
 			renderStatus((ctx ?? activeCtx)!);
 		}
+		if (publish) publishState();
 	}
 
 	/** 恢复挂起的常驻监控（参数沿用挂起前的配置，催促计数清零） */
@@ -308,6 +329,7 @@ export default function (pi: ExtensionAPI) {
 			`watchdog: 常驻监控已恢复（空闲 ${Math.round(state.timeoutMs / 1000)}s 后催促，最多 ${state.maxNudges} 次）`,
 			"info",
 		);
+		publishState();
 	}
 
 	/**
@@ -453,8 +475,9 @@ export default function (pi: ExtensionAPI) {
 			toolRegistered = true;
 			registerStopTool();
 		}
-		// 支持运行中重新 start：重置参数和计数
-		teardown();
+		// 支持运行中重新 start：重置参数和计数。内部重启不发布瞬时 false，
+		// 避免状态集成误判完成并响铃。
+		teardown(undefined, true, false);
 		state.keepAlive = keepAlive;
 		state.running = true;
 		state.timeoutMs = timeoutSeconds * 1000;
@@ -485,6 +508,7 @@ export default function (pi: ExtensionAPI) {
 			`watchdog: 监控已启动（${keepAlive ? "常驻模式，" : ""}空闲 ${timeoutSeconds}s 后催促，最多 ${state.maxNudges} 次）`,
 			"info",
 		);
+		publishState();
 	}
 
 	// ---------- 事件 ----------
@@ -600,8 +624,9 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("session_shutdown", async (_event, ctx) => {
-		teardown(ctx);
+	pi.on("session_shutdown", async (event, ctx) => {
+		// reload 只是毫秒级重绑扩展，不应向状态集成广播一次假完成。
+		teardown(ctx, true, event.reason !== "reload");
 		pendingRollback = null;
 	});
 
