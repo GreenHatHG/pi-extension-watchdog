@@ -146,6 +146,8 @@ interface WatchdogState {
 	pausedByActivity: boolean;
 	/** 用户最后一次按键（任意键）的时间戳，用于「正在操作」判断 */
 	lastInputAt: number;
+	/** 上一轮 AI 是被用户按 ESC 中止的：本次空闲不催促，等用户发下一条真实消息时清除 */
+	interrupted: boolean;
 	timer: ReturnType<typeof setTimeout> | null;
 	ticker: ReturnType<typeof setInterval> | null;
 }
@@ -334,6 +336,7 @@ export default function (pi: ExtensionAPI) {
 		pausedByInput: false,
 		pausedByActivity: false,
 		lastInputAt: 0,
+		interrupted: false,
 		timer: null,
 		ticker: null,
 	};
@@ -368,6 +371,7 @@ export default function (pi: ExtensionAPI) {
 			keepAlive: state.keepAlive,
 			countdownArmed: state.countdownDeadline != null,
 			paused: state.pausedByInput || state.pausedByActivity,
+			interrupted: state.interrupted,
 			nudgeCount: state.nudgeCount,
 			maxNudges: state.maxNudges,
 			timeoutMs: state.timeoutMs,
@@ -412,6 +416,9 @@ export default function (pi: ExtensionAPI) {
 		const count = fg(ctx, "dim", ` ${state.nudgeCount}/${state.maxNudges}`);
 		if (state.suspended) {
 			ctx.ui.setStatus(STATUS_KEY, fg(ctx, "muted", "⏱⏸") + count);
+		} else if (state.interrupted) {
+			// 你按 ESC 中止了上一轮：本次空闲不再催促，状态栏给出明确提示
+			ctx.ui.setStatus(STATUS_KEY, fg(ctx, "muted", "⏱⏹") + count);
 		} else if (state.countdownDeadline != null) {
 			const remaining = Math.max(0, Math.ceil((state.countdownDeadline - Date.now()) / 1000));
 			ctx.ui.setStatus(STATUS_KEY, fg(ctx, "accent", `⏱${remaining}s`) + count);
@@ -437,6 +444,7 @@ export default function (pi: ExtensionAPI) {
 		state.suspended = suspend;
 		state.pausedByInput = false;
 		state.pausedByActivity = false;
+		state.interrupted = false;
 		clearCountdown();
 		if (state.ticker) {
 			clearInterval(state.ticker);
@@ -461,6 +469,7 @@ export default function (pi: ExtensionAPI) {
 		_suspendedStore = false;
 		state.running = true;
 		state.nudgeCount = 0;
+		state.interrupted = false;
 		activeCtx = ctx;
 		startTicker();
 		ensureTerminalInputListener(ctx);
@@ -503,6 +512,11 @@ export default function (pi: ExtensionAPI) {
 	/** AI 空闲后启动/重启倒计时（编辑器有未发送文字或用户正在操作时先暂停，结束后再倒计时） */
 	function armCountdown(ctx: ExtensionContext) {
 		if (!state.running) return;
+		if (state.interrupted) {
+			// 上一轮是用户按 ESC 中止的：不要马上又催它继续，等用户发下一条真实消息（input 事件清标志）
+			renderStatus(ctx);
+			return;
+		}
 		clearCountdown();
 		if (editorHasText(ctx)) {
 			state.pausedByInput = true;
@@ -574,6 +588,18 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		renderStatus(ctx);
+	}
+
+	/**
+	 * 这一轮 AI 是否以「被中止」结束（用户按 ESC，或别的扩展调 abort）。
+	 * 中止时最后一条 assistant 消息的 stopReason 会是 "aborted"，由 agent_end 事件的 messages 带出来。
+	 */
+	function runWasAborted(messages: unknown): boolean {
+		if (!Array.isArray(messages)) return false;
+		return messages.some((m) => {
+			const msg = m as { role?: unknown; stopReason?: unknown } | undefined;
+			return msg?.role === "assistant" && msg?.stopReason === "aborted";
+		});
 	}
 
 	/** 会话中是否已有对话消息（用于判断是否为"全新无消息"的会话） */
@@ -700,6 +726,8 @@ export default function (pi: ExtensionAPI) {
 		activeCtx = ctx;
 		state.pausedByInput = false;
 		state.pausedByActivity = false;
+		// interrupted 标志不在这里清：AI 开始运行不等于用户回来了（其它扩展也能触发新一轮）。
+		// 清除时机在下方的 input 事件——“用户发来真实消息”的那一刻。
 		clearCountdown(); // AI 开始运行，取消倒计时
 		renderStatus(ctx);
 	});
@@ -716,6 +744,16 @@ export default function (pi: ExtensionAPI) {
 				"Watchdog decision turn: tools are blocked. Reply with a brief acknowledgement if work remains; " +
 				"the watchdog will send the continue instruction next. Otherwise call stop_watchdog.",
 		};
+	});
+
+	// 记下「这一轮是被中止的」（用户按 ESC 等），供 armCountdown 判断本次空闲是否还该催促。
+	// stop_watchdog 自己也会 abort，但它先 teardown 把 running 置为 false，所以不会误记。
+	// 时序安全：pi 保证扩展的 agent_end handler 执行完后才发 agent_settled，所以 settled 里读到的一定是新值。
+	pi.on("agent_end", async (event, _ctx) => {
+		if (state.running && runWasAborted(event.messages)) {
+			state.interrupted = true;
+			publishState();
+		}
 	});
 
 	// 决策回合的模型回复只是「还有活」的确认，会被折叠掉、没有上下文价值：落盘前剥掉，
@@ -738,7 +776,7 @@ export default function (pi: ExtensionAPI) {
 				content: hasToolCall
 					? (content as unknown[]).filter((block) => !(isRecord(block) && block.type === "text"))
 					: [],
-			},
+			} as typeof event.message,
 		};
 	});
 
@@ -798,8 +836,14 @@ export default function (pi: ExtensionAPI) {
 
 	// 常驻模式：用户发新消息 → 自动恢复挂起的监控
 	// （extension 来源是 watchdog 自己发的催促消息，排除；挂起期间催促本就不会发生）
+	// 用户真实消息同时解除「已按 ESC 打断」状态。
 	pi.on("input", async (event, ctx) => {
-		if (event.source !== "extension" && state.keepAlive && state.suspended && !state.running) {
+		if (event.source === "extension") return;
+		if (state.running && state.interrupted) {
+			state.interrupted = false; // 用户回来了，恢复可催促状态
+			publishState();
+		}
+		if (state.keepAlive && state.suspended && !state.running) {
 			resumeWatchdog(ctx);
 		}
 	});
@@ -913,7 +957,9 @@ export default function (pi: ExtensionAPI) {
 								? "输入中暂停（清空输入后恢复倒计时）"
 								: state.pausedByActivity
 									? "操作中暂停（停止按键后恢复倒计时）"
-									: "等待 AI 空闲";
+									: state.interrupted
+										? "已被 ESC 打断（本次空闲不再催促，发下一条消息后恢复）"
+										: "等待 AI 空闲";
 					const msgPreview = state.message.length > 30 ? `${state.message.slice(0, 30)}…` : state.message;
 					ctx.ui.notify(
 						`watchdog: 运行中 · ${countdown} · 已催 ${state.nudgeCount}/${state.maxNudges} · 追加指令: "${msgPreview || "-"}"`,

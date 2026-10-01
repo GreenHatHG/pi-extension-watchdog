@@ -181,14 +181,15 @@ export function createMockRuntime() {
 		const entry: any = { type: "message", id: `s${entrySeq}` };
 		sessionEntries.push(entry); // 模拟本轮产生了一条会话消息
 		setLeaf(entry.id);
-		await emit("agent_end");
+		// 正常结束的 assistant 消息 stopReason 为 "stop"（对应真实的 pi 行为）
+		await emit("agent_end", { messages: [{ role: "assistant", content: [], stopReason: "stop" }] });
 		idle = true;
 		await emit("agent_settled");
 	};
 
-	/** 模拟被中止的回合结束：不追加新消息（tool result 已落盘），直接 settle */
+	/** 模拟被中止的回合结束（如用户按 ESC）：不追加新消息，assistant 消息 stopReason 为 "aborted" */
 	const settleAbortedTurn = async () => {
-		await emit("agent_end");
+		await emit("agent_end", { messages: [{ role: "assistant", content: [], stopReason: "aborted" }] });
 		idle = true;
 		await emit("agent_settled");
 	};
