@@ -1,6 +1,7 @@
 /**
  * 共享的 pi 运行时 mock：模拟 extension 注册、工具/命令、active tools、
- * 空闲状态、终端按键广播。每个测试创建独立实例，互不污染。
+ * 空闲状态、终端按键广播、custom message 落盘与 context 折叠钩子。
+ * 每个测试创建独立实例，互不污染。
  */
 export type Handler = (event: any, ctx: any) => Promise<any>;
 
@@ -11,12 +12,17 @@ export function createMockRuntime() {
 	const commands = new Map<string, any>();
 	// 模拟 pi 的 active tools：registerTool 注册的工具默认进入 active 集合
 	const activeTools = new Set<string>(["read", "bash", "edit", "write"]);
+	// sendUserMessage / sendMessage 发出的文本（折叠标记等空内容内部标记不计入）
 	const sentMessages: string[] = [];
+	// 每次 sendMessage 的完整载荷（含 customType / details / options），供折叠与关联断言
+	const customMessages: { customType: string; content: any; display: boolean; details: any; options: any }[] = [];
+	// appendEntry 写入的 CustomEntry（不进 LLM 上下文）
+	const entries: { customType: string; data: any }[] = [];
+	// registerEntryRenderer 注册的渲染器（供决策卡片渲染断言）
+	const entryRenderers = new Map<string, (entry: any, options: any, theme: any) => any>();
 	let abortedTurns = 0;
-	const rollbackCalls: string[] = [];
 	const notifications: { msg: string; kind: string }[] = [];
 	const sessionEntries: any[] = [{ type: "message" }]; // 默认已有对话消息（模拟非空会话）；需要全新会话的用例显式清空
-	// 会话树 helpers：模拟真实 SessionManager 的 leaf 语义（真实测试用例可用 markLeaf 给任意条目设置 id）
 	let leafId: string | null = null;
 	const setLeaf = (id: string | null) => {
 		leafId = id;
@@ -24,11 +30,13 @@ export function createMockRuntime() {
 	const statusBars = new Map<string, string | undefined>();
 	let idle = true;
 	let editorText = "";
+	let pendingMessages = 0;
 	// 模拟 pi 的原始终端按键广播：watchdog 注册的 onTerminalInput 监听器都在这里
 	const inputListeners = new Set<(data: string) => any>();
 
 	const ctx: any = {
 		isIdle: () => idle,
+		hasPendingMessages: () => pendingMessages > 0,
 		// 模拟真实 pi：中止当前 agent 回合并回到空闲
 		abort: () => {
 			abortedTurns++;
@@ -51,6 +59,16 @@ export function createMockRuntime() {
 		},
 	};
 
+	let entrySeq = 0;
+	/** 模拟真实 pi：消息随回合落盘为条目并推进 leaf */
+	const pushMessage = (message: any) => {
+		entrySeq += 1;
+		const entry: any = { type: "message", id: `m${entrySeq}`, message };
+		sessionEntries.push(entry);
+		setLeaf(entry.id);
+		return entry;
+	};
+
 	const pi = {
 		events: {
 			on: (name: string, handler: (data: unknown) => void) => {
@@ -71,6 +89,26 @@ export function createMockRuntime() {
 			activeTools.add(tool.name); // 模拟真实 pi：注册的工具默认进入 active 集合
 		},
 		registerCommand: (name: string, def: any) => commands.set(name, def),
+		registerMessageRenderer: () => {},
+		registerEntryRenderer: (customType: string, renderer: any) => entryRenderers.set(customType, renderer),
+		appendEntry: (customType: string, data?: unknown) => {
+			entries.push({ customType, data });
+		},
+		sendMessage: (message: any, options?: any) => {
+			customMessages.push({ ...message, options });
+			const text = typeof message.content === "string" ? message.content : "";
+			// 折叠终止标记是空内容内部标记，不算「发给模型的文本」
+			if (text) sentMessages.push(text);
+			pushMessage({
+				role: "custom",
+				customType: message.customType,
+				content: text,
+				display: message.display,
+				details: message.details,
+				timestamp: Date.now(),
+			});
+			if (options?.triggerTurn) idle = false; // custom message 触发新一轮运行
+		},
 		sendUserMessage: async (content: string, options?: any) => {
 			// 模拟真实 pi：expandPromptTemplates 时斜杠命令在 prompt 入口被拦截执行，
 			// 不会作为用户消息发送，也不会触发 agent 运行
@@ -80,24 +118,13 @@ export function createMockRuntime() {
 				const args = space === -1 ? "" : content.slice(space + 1);
 				const cmd = commands.get(name);
 				if (cmd) {
-					// 模拟 ExtensionCommandContext：普通 ctx + navigateTree
-					const cmdCtx: any = {
-						...ctx,
-						navigateTree: (targetId: string) => {
-							rollbackCalls.push(targetId);
-							// 模拟真实 navigateTree：从 branch 里砍掉 target 之后的所有条目
-							const idx = sessionEntries.findIndex((e: any) => e?.id === targetId);
-							if (idx !== -1) sessionEntries.splice(idx + 1);
-						},
-					};
-					await cmd.handler(args, cmdCtx);
+					await cmd.handler(args, ctx);
 					return;
 				}
 			}
 			if (!idle) throw new Error("busy");
 			sentMessages.push(content);
-			// 模拟真实 pi：消息随回合启动落盘为 user 消息条目并推进 leaf
-			appendNudgeMessage(content);
+			pushMessage({ role: "user", content });
 			idle = false;
 		},
 		getActiveTools: () => Array.from(activeTools),
@@ -112,21 +139,46 @@ export function createMockRuntime() {
 		for (const h of handlers.get(name) ?? []) await h(event, ctx);
 	};
 
+	/** 按 pi 的 context 钩子语义跑一遍折叠（deep-copy 由真实 pi 负责；这里直接改数组副本） */
+	const emitContext = async (messages: any[]) => {
+		let current = messages;
+		for (const h of handlers.get("context") ?? []) {
+			const result = await h({ type: "context", messages: current }, ctx);
+			if (result?.messages) current = result.messages;
+		}
+		return current;
+	};
+
+	/** 触发 tool_call 钩子并返回第一个非空结果（模拟 pi 的拦截语义） */
+	const emitToolCall = async (event: any) => {
+		for (const h of handlers.get("tool_call") ?? []) {
+			const result = await h({ type: "tool_call", ...event }, ctx);
+			if (result) return result;
+		}
+		return undefined;
+	};
+
+	/** 触发 message_end 钩子并返回第一个非空结果（模拟 pi 的消息替换） */
+	const emitMessageEnd = async (message: any) => {
+		for (const h of handlers.get("message_end") ?? []) {
+			const result = await h({ type: "message_end", message }, ctx);
+			if (result) return result;
+		}
+		return undefined;
+	};
+
+	/** 当前会话分支对应的 AgentMessage 列表（custom message 以 role:"custom" 呈现） */
+	const currentMessages = () => sessionEntries.map((e: any) => e?.message).filter((m: any) => m !== undefined);
+
 	/** 模拟用户按下一个键（上下选择命令、翻历史等任意按键） */
 	const pressKey = () => {
 		for (const l of inputListeners) l("x");
 	};
 
-	/** 模拟催促消息落盘：push 一条 user 消息并置 leaf（与真实 pi 的 appendMessage 对齐） */
-	const appendNudgeMessage = (text: string) => {
-		const entry: any = { type: "message", id: `n${sessionEntries.length}`, message: { role: "user", content: text } };
-		sessionEntries.push(entry);
-		setLeaf(entry.id);
-	};
-
 	/** 模拟 agent 跑完一轮：回到空闲并触发 agent_settled（watchdog 由此重新倒计时） */
 	const settleAfterRun = async () => {
-		const entry: any = { type: "message", id: `m${sessionEntries.length}` };
+		entrySeq += 1;
+		const entry: any = { type: "message", id: `s${entrySeq}` };
 		sessionEntries.push(entry); // 模拟本轮产生了一条会话消息
 		setLeaf(entry.id);
 		await emit("agent_end");
@@ -151,11 +203,15 @@ export function createMockRuntime() {
 		pi,
 		ctx,
 		emit,
+		emitContext,
+		emitToolCall,
+		emitMessageEnd,
+		currentMessages,
 		pressKey,
 		settleAfterRun,
 		settleAbortedTurn,
 		newPlugin,
-		appendNudgeMessage,
+		pushMessage,
 		setLeaf,
 		state: {
 			get idle() {
@@ -170,6 +226,12 @@ export function createMockRuntime() {
 			set editorText(v: string) {
 				editorText = v;
 			},
+			get pendingMessages() {
+				return pendingMessages;
+			},
+			set pendingMessages(v: number) {
+				pendingMessages = v;
+			},
 			get abortedTurns() {
 				return abortedTurns;
 			},
@@ -178,10 +240,12 @@ export function createMockRuntime() {
 		commands,
 		activeTools,
 		sentMessages,
+		customMessages,
+		entries,
+		entryRenderers,
 		notifications,
 		statusBars,
 		sessionEntries,
-		rollbackCalls,
 		eventBusHandlers,
 	};
 }

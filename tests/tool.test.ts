@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { nudgeText as nudge } from "../index.ts";
-import { setup } from "./helpers/setup.js";
+import { continuationMessages, nudgeMessages, setup } from "./helpers/setup.js";
 
 beforeEach(() => {
 	vi.useFakeTimers();
@@ -14,15 +13,17 @@ it("AI 调用 stop_watchdog（once 模式）→ 彻底停止，工具常驻不�
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1 message=工具测试", rt.ctx);
 	await rt.settleAfterRun();
-	await vi.advanceTimersByTimeAsync(1100);
-	expect(rt.sentMessages.at(-1)).toBe(nudge("工具测试")); // 停止前已催促过一次
+	await vi.advanceTimersByTimeAsync(1100); // 决策回合
+	expect(nudgeMessages(rt)).toHaveLength(1);
 
+	// 决策回合内 AI 调 stop_watchdog → 结果 = 停止
 	const result = await rt.tools.get("stop_watchdog").execute("t1", {}, undefined, undefined, rt.ctx);
 	expect(JSON.stringify(result.content)).toContain("OK.");
 
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1300);
-	expect(rt.sentMessages.at(-1)).toBe(nudge("工具测试")); // 停止后不再催促
+	expect(continuationMessages(rt)).toHaveLength(0); // 停止后不再发继续消息
+	expect(nudgeMessages(rt)).toHaveLength(1); // 也不再发起新的决策回合
 	expect(rt.activeTools.has("stop_watchdog")).toBe(true); // 常驻注册：工具始终保留，不再随启停移出
 });
 

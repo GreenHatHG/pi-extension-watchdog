@@ -35,7 +35,8 @@ it("合法参数组合 timeout/max/message 解析生效并按配置催促", asyn
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1 max=2 message=解析测试", rt.ctx);
 	await rt.settleAfterRun();
-	await vi.advanceTimersByTimeAsync(1100);
+	await vi.advanceTimersByTimeAsync(1100); // 决策回合
+	await rt.settleAfterRun(); // 决策回合结束 → 继续消息
 	expect(rt.sentMessages.at(-1)).toBe(nudge("解析测试"));
 	await rt.settleAfterRun();
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
@@ -46,7 +47,8 @@ it("message= 含空格的多 token 文案拼接", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1 message=继续 下一步", rt.ctx);
 	await rt.settleAfterRun();
-	await vi.advanceTimersByTimeAsync(1100);
+	await vi.advanceTimersByTimeAsync(1100); // 决策回合
+	await rt.settleAfterRun(); // 决策回合结束 → 继续消息
 	expect(rt.sentMessages.at(-1)).toBe(nudge("继续 下一步"));
 	await rt.settleAfterRun();
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);

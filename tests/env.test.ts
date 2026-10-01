@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { nudgeText as nudge } from "../index.ts";
-import { setup } from "./helpers/setup.js";
+import { nudgeMessages, setup } from "./helpers/setup.js";
 
 beforeEach(() => {
 	vi.useFakeTimers();
@@ -16,7 +16,9 @@ it("PI_WATCHDOG 合法配置：session_start 自动启动，超时后用自定�
 	await rt.emit("session_start", { reason: "startup" });
 	expect(rt.notifications.some((n) => n.msg.includes("监控已启动"))).toBe(true);
 
-	await vi.advanceTimersByTimeAsync(1300);
+	await vi.advanceTimersByTimeAsync(1300); // 决策回合
+	expect(nudgeMessages(rt)).toHaveLength(1);
+	await rt.settleAfterRun(); // 决策回合结束 → 继续消息
 	expect(rt.sentMessages.at(-1)).toBe(nudge("环境变量文案"));
 
 	await rt.settleAfterRun();
@@ -36,7 +38,8 @@ it("/resume 恢复会话：监控已启动但不立即倒计时，首次 agent_s
 
 	// 实际操作（AI 跑完一轮）后开始正常倒计时
 	await rt.settleAfterRun();
-	await vi.advanceTimersByTimeAsync(1300);
+	await vi.advanceTimersByTimeAsync(1300); // 决策回合
+	await rt.settleAfterRun(); // 决策回合结束 → 继续消息
 	expect(rt.sentMessages.at(-1)).toBe(nudge("环境变量文案"));
 
 	await rt.settleAfterRun();

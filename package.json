@@ -36,6 +36,7 @@
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.5.14",
+		"@earendil-works/pi-tui": "^0.85.1",
 		"@types/node": "^22.20.3",
 		"typescript": "^7.0.2",
 		"vitest": "^5.0.1"

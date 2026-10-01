@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { DEFAULT_MESSAGE, nudgeText as nudge } from "../index.ts";
-import { setup } from "./helpers/setup.js";
+import { nudgeMessages, setup } from "./helpers/setup.js";
 
 beforeEach(() => {
 	vi.useFakeTimers();
@@ -17,11 +17,15 @@ it("首次启动且会话无消息 → 不倒计时，等首轮 agent_settled �
 	expect(rt.activeTools.has("stop_watchdog")).toBe(true); // 启动后工具激活
 
 	await vi.advanceTimersByTimeAsync(1300);
-	expect(rt.sentMessages.filter((m) => m === DEFAULT_MESSAGE)).toHaveLength(0); // 无消息时不催促
+	expect(nudgeMessages(rt)).toHaveLength(0); // 无消息时不催促
 	expect(rt.notifications.some((n) => n.msg.includes("暂无消息"))).toBe(true);
 
 	await rt.settleAfterRun(); // AI 第一轮结束 → 开始倒计时
-	await vi.advanceTimersByTimeAsync(1200);
+	await vi.advanceTimersByTimeAsync(1200); // 决策回合
+	expect(nudgeMessages(rt)).toHaveLength(1);
+	expect(rt.sentMessages).not.toContain(DEFAULT_MESSAGE); // 决策回合还没结束，继续消息尚未发出
+
+	await rt.settleAfterRun(); // 决策回合结束（模型回文字）→ 发继续消息
 	expect(rt.sentMessages.filter((m) => m === DEFAULT_MESSAGE)).toHaveLength(1);
 
 	await rt.settleAfterRun();
@@ -36,32 +40,36 @@ it("AI 运行中不催促；停止后重新倒计时再催促", async () => {
 
 	await rt.emit("agent_start");
 	await vi.advanceTimersByTimeAsync(1200);
-	expect(rt.sentMessages).not.toContain(nudge("测试继续")); // 运行期间不催促
+	expect(nudgeMessages(rt)).toHaveLength(0); // 运行期间不催促
 
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(600);
 	await rt.emit("agent_start"); // AI 又跑一下（倒计时被取消重建）
 	await vi.advanceTimersByTimeAsync(600);
-	expect(rt.sentMessages).not.toContain(nudge("测试继续"));
+	expect(nudgeMessages(rt)).toHaveLength(0);
 
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1100);
+	expect(nudgeMessages(rt)).toHaveLength(1);
+	await rt.settleAfterRun(); // 决策回合结束 → 继续消息
 	expect(rt.sentMessages.at(-1)).toBe(nudge("测试继续"));
-	expect(rt.state.idle).toBe(false); // 发送后模拟 AI 开始运行
+	expect(rt.state.idle).toBe(false); // 继续消息触发新一轮，模拟 AI 开始运行
 });
 
 it("max= 次数上限：达到后自动停止并通知", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1 max=2 message=上限测试", rt.ctx);
 	for (let i = 0; i < 2; i++) {
-		await rt.settleAfterRun();
-		await vi.advanceTimersByTimeAsync(1100);
+		await rt.settleAfterRun(); // 上一轮结束 → 倒计时
+		await vi.advanceTimersByTimeAsync(1100); // 决策回合
+		await rt.settleAfterRun(); // 决策回合结束 → 继续消息
 	}
+	expect(nudgeMessages(rt)).toHaveLength(2);
 	expect(rt.sentMessages.filter((m) => m === nudge("上限测试"))).toHaveLength(2);
 
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1100); // 第 3 次应被拦截并自动停止
-	expect(rt.sentMessages.filter((m) => m === nudge("上限测试"))).toHaveLength(2);
+	expect(nudgeMessages(rt)).toHaveLength(2);
 	expect(rt.notifications.some((n) => n.msg.includes("已自动停止"))).toBe(true);
 });
 
@@ -70,7 +78,7 @@ it("手动 stop 后不再催促；status 正确反映运行/未运行状态", as
 	await rt.commands.get("watchdog").handler("timeout=1 message=手动测试", rt.ctx);
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 	await vi.advanceTimersByTimeAsync(1200);
-	expect(rt.sentMessages).not.toContain(nudge("手动测试"));
+	expect(nudgeMessages(rt)).toHaveLength(0);
 
 	rt.notifications.length = 0;
 	await rt.commands.get("watchdog").handler("status", rt.ctx);
@@ -109,8 +117,9 @@ it("运行中重新 /watchdog：重置参数、文案与催促计数，旧倒计
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1 max=5 message=旧文案", rt.ctx);
 	await rt.settleAfterRun();
-	await vi.advanceTimersByTimeAsync(1100);
-	expect(rt.sentMessages.filter((m) => m === nudge("旧文案"))).toHaveLength(1); // 已催 1 次
+	await vi.advanceTimersByTimeAsync(1100); // 决策回合
+	await rt.settleAfterRun(); // 决策回合结束 → 旧文案继续消息
+	expect(rt.sentMessages.filter((m) => m === nudge("旧文案"))).toHaveLength(1);
 
 	await rt.commands.get("watchdog").handler("timeout=1 message=新文案", rt.ctx); // 运行中重入
 	rt.notifications.length = 0;
@@ -119,7 +128,8 @@ it("运行中重新 /watchdog：重置参数、文案与催促计数，旧倒计
 	expect(rt.notifications.some((n) => n.msg.includes("已催 0/5"))).toBe(true); // 未指定 max 时沿用旧值
 
 	await rt.settleAfterRun();
-	await vi.advanceTimersByTimeAsync(1200);
+	await vi.advanceTimersByTimeAsync(1200); // 决策回合
+	await rt.settleAfterRun(); // 决策回合结束 → 新文案继续消息
 	expect(rt.sentMessages.filter((m) => m === nudge("旧文案"))).toHaveLength(1); // 旧参数/旧计时器已清
 	expect(rt.sentMessages.filter((m) => m === nudge("新文案"))).toHaveLength(1);
 });

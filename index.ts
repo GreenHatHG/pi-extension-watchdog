@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { Box, type Component, Text, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 const DEFAULT_TIMEOUT_SECONDS = 60;
@@ -10,15 +11,57 @@ export const DEFAULT_MESSAGE =
 	"If waiting on a user decision, don't change code — state what you need, then call stop_watchdog as your final action. " +
 	"If no work remains and no decision is pending, call stop_watchdog to end the turn.";
 
-/** 组装催促消息：固定触发行 + 可选追加指令（message=），自定义内容不会替换触发行语义。 */
+/** 组装继续消息（真正触发工作回合）：固定触发行 + 可选追加指令（message=），自定义内容不会替换触发行语义。 */
 export function nudgeText(hint?: string): string {
 	return hint ? `${DEFAULT_MESSAGE}\n\nTask instruction: ${hint}` : DEFAULT_MESSAGE;
+}
+
+/**
+ * 决策回合提示词（折叠区间的起点）。
+ * 这一回合禁止干活：除 stop_watchdog 外的工具全被拦截，模型只能
+ *   1) 回文字 = 还有活（下一步由 watchdog 发继续消息让它开工），或
+ *   2) 调 stop_watchdog = 没活 / 等用户。
+ * 因为决策回合不产生任何需要保留的工作，它的全部内容能作为一个封闭交换被折叠掉，
+ * 而后续工作回合追加在其后，prompt cache 前缀保持稳定。
+ */
+export function decisionText(): string {
+	return (
+		"[Automated, not user input] Watchdog check — do not use tools in this turn. " +
+		"Reply with a brief acknowledgement if work remains; the watchdog will send the actual continue " +
+		"instruction in the next turn. If no work remains, or you are waiting on a user decision, call " +
+		"stop_watchdog as your final action."
+	);
 }
 
 /** 用户最后一次按键后多久内视为「仍在操作」（上下选择、翻历史等），期间暂停倒计时 */
 const ACTIVITY_GRACE_MS = 2000;
 
 const TOOL_NAME = "stop_watchdog";
+
+/** nudge/continuation/fold 三类可折叠消息共用的关联载荷版本 */
+export const WATCHDOG_MESSAGE_VERSION = 1;
+/** 决策消息（原催促触发行）：display:false，携带 exchangeId 供上下文折叠关联 */
+export const NUDGE_MESSAGE_TYPE = "pi-watchdog:nudge";
+/** 继续消息：决策结果为 continue 时发出，触发真正的工作回合，兼作折叠区间终止标记 */
+export const CONTINUATION_MESSAGE_TYPE = "pi-watchdog:continuation";
+/** 停止标记：决策结果为 stop 时写入，供折叠删除整个决策交换 */
+export const FOLD_MESSAGE_TYPE = "pi-watchdog:fold";
+/** 决策卡片：TUI-only 条目（appendEntry，不进上下文、不参与折叠），展示一次决策检查的结果与 AI 回复 */
+export const DECISION_ENTRY_TYPE = "pi-watchdog:decision";
+/** 决策卡片里 AI 回复的最大留存长度（会话文件体积 vs 可读性） */
+const DECISION_REPLY_MAX_CHARS = 300;
+
+/** 决策卡片的持久化载荷（写入 session 的 CustomEntry，不进 LLM 上下文） */
+export interface DecisionCardData {
+	version: number;
+	exchangeId: string;
+	outcome: "continue" | "stop" | "superseded";
+	/** 决策回合里 AI 的回复文本（已截断）；被拦截工具调用附带的文字也在此 */
+	reply?: string;
+	nudgeCount: number;
+	maxNudges: number;
+	ts: number;
+}
 
 const STATUS_KEY = "watchdog";
 
@@ -107,12 +150,6 @@ interface WatchdogState {
 	ticker: ReturnType<typeof setInterval> | null;
 }
 
-/** PI_WATCHDOG_ROLLBACK=1/true 开启 stop 后上下文回滚，默认关闭 */
-function isRollbackEnvEnabled(): boolean {
-	const flag = process.env.PI_WATCHDOG_ROLLBACK?.trim().toLowerCase();
-	return flag === "1" || flag === "true";
-}
-
 /**
  * 会话是否来自「恢复」而非全新开始：/resume 换会话（resume）、/fork / /clone 恢复旧树点（fork）。
  * 恢复进来的会话虽有历史消息，但本进程实例里 AI 还没干过活，立即倒计时会在用户
@@ -122,57 +159,169 @@ function isRestoredReason(reason: string | undefined): boolean {
 	return reason === "resume" || reason === "fork";
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** 从 assistant 消息 content 里抽出纯文本（决策卡片用；忽略 toolCall / thinking 等块） */
+function textFromContent(content: unknown): string {
+	if (typeof content === "string") return content.trim();
+	if (!Array.isArray(content)) return "";
+	const parts: string[] = [];
+	for (const block of content) {
+		if (isRecord(block) && block.type === "text" && typeof block.text === "string") parts.push(block.text);
+	}
+	return parts.join(" ").replace(/\s+/g, " ").trim();
+}
+
+/** 只把「合法关联的决策消息」当作折叠起点，其它一切 custom 消息都不动 */
+function messageExchangeId(message: unknown): string | undefined {
+	if (!isRecord(message) || message.role !== "custom") return undefined;
+	if (message.customType !== NUDGE_MESSAGE_TYPE) return undefined;
+	const details = message.details;
+	if (!isRecord(details) || details.version !== WATCHDOG_MESSAGE_VERSION) return undefined;
+	const exchangeId = details.exchangeId;
+	return typeof exchangeId === "string" && exchangeId.length > 0 ? exchangeId : undefined;
+}
+
+function sameExchange(message: unknown, customType: string, exchangeId: string): boolean {
+	if (!isRecord(message) || message.role !== "custom" || message.customType !== customType) return false;
+	const details = message.details;
+	if (!isRecord(details) || details.version !== WATCHDOG_MESSAGE_VERSION) return false;
+	return details.exchangeId === exchangeId;
+}
+
 /**
- * 校验回滚点之后是否只有本次催促的 stop 交换（纯尾巴）。
- * 只允许删后缀：中段删除会位移后续字节打爆 prompt cache，
- * 且会产生未配对的 tool_use。发现任何非催促交换的内容（真活）都返回 false。
+ * 折叠一次决策交换（纯函数：结果只从消息本身推导，因此 resume/reload 后同样成立）。
+ *
+ * 删除区间 = [决策消息, 终止标记)：
+ *  - 终止标记是同 exchangeId 的 continuation → 删掉整段决策交换、保留 continuation，
+ *    后续工作回合就追加在它后面；
+ *  - 终止标记是同 exchangeId 的折叠标记（stop = AI 主动停；superseded = 决策期间用户接管/
+ *    回合出错而没有产出继续消息）→ 连标记一起删。
+ * 区间内允许 assistant / toolResult（被拦截工具的结果也在区间里，成对一起删，不会破坏 tool_use 配对）。
+ * 出现真实 user 消息、其它插件 custom、或另一个 exchange 的 watchdog 消息 → fail closed（原样保留）。
+ * 找不到终止标记（决策回合还在进行中）→ 同样保留，否则模型将看不到决策提示词。
  */
-function validateRollbackTail(sessionManager: any, targetId: string, nudgeFullText: string): boolean {
-	let branch: any[];
-	try {
-		branch = sessionManager.getBranch();
-	} catch {
-		return false;
-	}
-	const idx = branch.findIndex((e: any) => e?.id === targetId);
-	if (idx === -1) return false;
-	const tail = branch.slice(idx + 1);
-	if (tail.length === 0) return false;
-	let sawStopExchange = false;
-	for (const e of tail) {
-		if (e.type !== "message") return false; // custom/compaction 等任何其他类型都不可回滚
-		const msg = e.message;
-		if (!msg) return false;
-		if (msg.role === "user") {
-			const text =
-				typeof msg.content === "string"
-					? msg.content
-					: (msg.content ?? [])
-							.filter((c: any) => c.type === "text")
-							.map((c: any) => c.text)
-							.join("");
-			if (text !== nudgeFullText) return false; // 有真实用户消息混入
-		} else if (msg.role === "assistant") {
-			// 文字不作为真活证据：回滚会把 nudge 后整段交换删掉（含本条消息），
-			// 文字本身无状态、删掉无损失；真活的证据是工具调用。
-			for (const c of msg.content ?? []) {
-				if (c.type === "toolCall") {
-					if (c.name !== TOOL_NAME) return false; // 调了别的工具 = 干了活
-					sawStopExchange = true;
+export function foldWatchdogContext<T extends object>(messages: T[]): T[] {
+	const drop = new Array<boolean>(messages.length).fill(false);
+	for (let i = 0; i < messages.length; i += 1) {
+		const exchangeId = messageExchangeId(messages[i]);
+		if (exchangeId === undefined) continue;
+		let end = -1; // 删除区间 [i, end)
+		let complete = false;
+		for (let j = i + 1; j < messages.length; j += 1) {
+			const message: unknown = messages[j];
+			if (isRecord(message) && message.role === "custom") {
+				if (sameExchange(message, CONTINUATION_MESSAGE_TYPE, exchangeId)) {
+					end = j; // 保留 continuation 本身
+					complete = true;
+				} else if (sameExchange(message, FOLD_MESSAGE_TYPE, exchangeId)) {
+					end = j + 1; // 折叠标记一并删除
+					complete = true;
 				}
-				// text/thinking 允许：abort 截不掉 toolCall 前已落盘的文字，纯文字回复也无状态
+				break; // 其它 custom（含其它 exchange）一律视作边界，fail closed
 			}
-		} else if (msg.role === "toolResult") {
-			if (msg.toolName !== TOOL_NAME) return false;
-			sawStopExchange = true;
-		} else {
-			return false;
+			if (isRecord(message) && (message.role === "assistant" || message.role === "toolResult")) continue;
+			break; // 真实 user 消息 / 摘要等 → fail closed
 		}
+		if (!complete || end < 0) continue;
+		for (let k = i; k < end; k += 1) drop[k] = true;
+		i = end - 1;
 	}
-	return sawStopExchange;
+	return drop.some(Boolean) ? messages.filter((_, index) => !drop[index]) : messages;
+}
+
+/** 每次 provider 请求前注册折叠：只改请求视图，不碰会话记录 */
+export function registerWatchdogContextFolding(pi: ExtensionAPI): void {
+	pi.on("context", (event) => ({ messages: foldWatchdogContext(event.messages) }));
+}
+
+const DECISION_OUTCOME_LABEL: Record<DecisionCardData["outcome"], string> = {
+	continue: "还有活 → 继续",
+	stop: "AI 主动停止",
+	superseded: "用户接管，本次检查作废",
+};
+
+const DECISION_OUTCOME_COLOR: Record<DecisionCardData["outcome"], "accent" | "success" | "warning"> = {
+	continue: "accent",
+	stop: "success",
+	superseded: "warning",
+};
+
+/** 被用户点击展开过的决策卡片（按 exchangeId）：跨 rebuild（全局 ctrl+o / 主题变化）保留单卡展开态 */
+const expandedDecisionCards = new Set<string>();
+
+/**
+ * 决策卡片组件：把每次决策检查的结果（继续 / 主动停止 / 用户接管）展示在 TUI 时间线里。
+ * 数据来自 appendEntry 的 CustomEntry——纯 TUI，不进上下文，也不参与折叠。
+ *
+ * 决策回合的 AI 回复已经随决策交换折叠出上下文，默认不再原样铺在时间线上：
+ * 未展开时只留一行灰字说明「已折叠」，全屏下点击卡片、或按 `ctrl+o` 全局展开后才显示全文。
+ */
+class DecisionCardComponent implements Component {
+	private expanded: boolean;
+	private box: Box;
+
+	constructor(
+		private readonly data: DecisionCardData,
+		private readonly theme: Theme,
+		expanded: boolean,
+	) {
+		this.expanded = expanded;
+		this.box = this.build();
+	}
+
+	private build(): Box {
+		const { data, theme } = this;
+		const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
+		box.addChild(
+			new Text(
+				`${theme.fg("muted", "⏱")} ${theme.fg(
+					DECISION_OUTCOME_COLOR[data.outcome],
+					DECISION_OUTCOME_LABEL[data.outcome],
+				)} ${theme.fg("dim", `(第 ${data.nudgeCount}/${data.maxNudges} 次检查)`)}`,
+				0,
+				0,
+			),
+		);
+		if (data.reply) {
+			const hint = this.expanded ? `AI：${data.reply}` : "（决策回复已折叠 · 点击或 ctrl+o 展开）";
+			box.addChild(new Text(theme.fg("dim", hint), 0, 0));
+		}
+		return box;
+	}
+
+	render(width: number): string[] {
+		return this.box.render(width);
+	}
+
+	handleMouse(event: TuiMouseEvent): { handled: true } | undefined {
+		if (event.type !== "click" || event.button !== "left" || !this.data.reply) return undefined;
+		this.expanded = !this.expanded;
+		if (this.expanded) expandedDecisionCards.add(this.data.exchangeId);
+		else expandedDecisionCards.delete(this.data.exchangeId);
+		this.box = this.build();
+		return { handled: true };
+	}
+
+	invalidate(): void {
+		this.box.invalidate();
+	}
+}
+
+export function registerDecisionCardRenderer(pi: ExtensionAPI): void {
+	pi.registerEntryRenderer<DecisionCardData>(DECISION_ENTRY_TYPE, (entry, { expanded }, theme) => {
+		const data = entry.data;
+		if (!data) return undefined;
+		return new DecisionCardComponent(data, theme, expanded || expandedDecisionCards.has(data.exchangeId));
+	});
 }
 
 export default function (pi: ExtensionAPI) {
+	// 卡片渲染器必须在加载时就注册（而非启动监控时），这样 /resume 恢复的历史决策卡片也能渲染。
+	registerDecisionCardRenderer(pi);
+
 	const state: WatchdogState = {
 		running: false,
 		keepAlive: false,
@@ -195,12 +344,18 @@ export default function (pi: ExtensionAPI) {
 	let _suspendedStore = false;
 	/** 原始按键监听的取消函数（interactive 模式才有） */
 	let unsubTerminalInput: (() => void) | null = null;
-	/** 是否启用 stop 后上下文回滚：默认关闭，设 PI_WATCHDOG_ROLLBACK=1 开启（加载时读取，会话重载时刷新） */
-	let rollbackEnabled = isRollbackEnvEnabled();
-	/** 最近一次催促发送前的 leaf id + 催促全文，供 stop 后回滚校验 */
-	let rollbackMark: { leafId: string; nudgeFullText: string } | null = null;
-	/** 待执行的上下文回滚：stop_watchdog 调用后，把 nudge 交换从会话尾部砍掉 */
-	let pendingRollback: { leafId: string; nudgeFullText: string; attempts: number; lastError?: string } | null = null;
+	/**
+	 * 决策窗口：决策消息发出 → 该回合 settle 之间。窗口内除 stop_watchdog 外的工具全部拦截，
+	 * 保证这一回合只产出可折叠的决策交换，不产出需要保留的真实工作。
+	 */
+	let decisionWindow: { exchangeId: string; stopCalled: boolean; replyText?: string } | null = null;
+	let exchangeCounter = 0;
+
+	/** 生成一次决策交换的关联 id（决定哪些消息属于同一可折叠区间） */
+	function createExchangeId(): string {
+		exchangeCounter += 1;
+		return `w${Date.now().toString(36)}-${exchangeCounter}`;
+	}
 
 	/**
 	 * 向其它扩展发布 watchdog 的生命周期真值。agent_settled 只表示 Pi 当前一轮结束，
@@ -221,12 +376,6 @@ export default function (pi: ExtensionAPI) {
 
 	// 查询/响应避免依赖扩展加载顺序，也让 /reload 后的消费者拿到当前真值。
 	pi.events.on("watchdog:state:query", publishState);
-
-	/** 截断错误文本，保证 notify 单行不超过终端宽度 */
-	function truncateError(err: unknown, max = 80): string {
-		const msg = err instanceof Error ? err.message : String(err);
-		return msg.length > max ? `${msg.slice(0, max - 1)}…` : msg;
-	}
 
 	function clearCountdown() {
 		if (state.timer) {
@@ -403,22 +552,24 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		try {
-			// 记录回滚点：发送前的 leaf。stop 后若 nudge 之后只有 stop 交换，可砸尾回滚
-			// 仅在启用回滚时记录标记；默认关闭，stop 后上下文保持现状
-			if (rollbackEnabled) {
-				try {
-					const leafId = (ctx.sessionManager as any)?.getLeafId?.();
-					const fullText = nudgeText(state.message || undefined);
-					rollbackMark = typeof leafId === "string" ? { leafId, nudgeFullText: fullText } : null;
-				} catch {
-					rollbackMark = null;
-				}
-			}
-			// 空闲状态直接发送，触发新一轮
-			pi.sendUserMessage(nudgeText(state.message || undefined));
-			ctx.ui.notify(`watchdog: 已发送催促消息 (${state.nudgeCount}/${state.maxNudges})`, "info");
+			const exchangeId = createExchangeId();
+			decisionWindow = { exchangeId, stopCalled: false };
+			// marker 走 appendEntry（CustomEntry 不进上下文），跨 resume/reload 也能识别这次交换
+			pi.appendEntry("pi-watchdog:nudge-marker", { version: WATCHDOG_MESSAGE_VERSION, exchangeId });
+			// 决策回合：display:false 不污染 TUI 历史；details 里的 exchangeId 让 context 钩子定位这段交换
+			pi.sendMessage(
+				{
+					customType: NUDGE_MESSAGE_TYPE,
+					content: decisionText(),
+					display: false,
+					details: { version: WATCHDOG_MESSAGE_VERSION, exchangeId },
+				},
+				{ triggerTurn: true, deliverAs: "steer" },
+			);
+			ctx.ui.notify(`watchdog: 已发起继续检查 (${state.nudgeCount}/${state.maxNudges})`, "info");
 		} catch {
 			// 极小概率竞态：发送瞬间 AI 开始运行。不计入次数，等 agent_settled 重新倒计时
+			decisionWindow = null;
 			state.nudgeCount--;
 			return;
 		}
@@ -513,12 +664,14 @@ export default function (pi: ExtensionAPI) {
 
 	// ---------- 事件 ----------
 
+	// 每次 provider 请求前折叠决策交换：只影响请求视图，不碰会话记录，
+	// 因此无需 beta 开关、也不依赖 navigateTree / 命令跳板。
+	registerWatchdogContextFolding(pi);
+
 	pi.on("session_start", async (event, ctx) => {
-		rollbackEnabled = isRollbackEnvEnabled(); // 会话重载/切换时重新读取
 		const envConfig = parseEnvConfig();
 		if (envConfig?.ok && !state.running) {
-			// env 启动与手动命令同走 startWatchdog；回滚能力由内部命令跳板提供，
-			// 不依赖启动路径，因此无需借命令自举
+			// env 启动与手动命令同走 startWatchdog；上下文折叠由 context 钩子统一处理，与启动路径无关
 			startWatchdog(
 				ctx,
 				envConfig.timeoutSeconds,
@@ -551,66 +704,93 @@ export default function (pi: ExtensionAPI) {
 		renderStatus(ctx);
 	});
 
-	// 回滚跳板：把 /watchdog-internal 命令经 pi.sendUserMessage 送进命令管线，
-	// 借命令 ctx 拿到 navigateTree。注意扩展 API 的 pi.sendUserMessage 是
-	// fire-and-forget：返回 undefined（AgentSession.sendUserMessage 才返回 Promise），
-	// 底层失败（如 stop 后 abort 窗口内的 "This operation was aborted"）只会经
-	// emitError 打到界面上，扩展侧拿不到 rejection，无法 .catch() 观察失败。
-	// 因此以 watchdog-internal 命令是否消费掉 pendingRollback 作为"发送成功"回执：
-	// 超时未消费就重发；命令侧一次性消费，重复发送只会空跑，安全。
-	function sendRollbackJump() {
-		const pr = pendingRollback;
-		if (!pr) return;
-		if (activeCtx && !activeCtx.isIdle()) {
-			// stop_watchdog 的 ctx.abort() 窗口内发送会被吞（"This operation was aborted"），
-			// 等回合真正结束后再发（等待不计次数，上限由重试链兜底）
-			setTimeout(() => sendRollbackJump(), 200);
-			return;
-		}
-		try {
-			(pi.sendUserMessage as any)(`/watchdog-internal op=rollback target=${pr.leafId}`, {
-				expandPromptTemplates: true,
-			});
-		} catch (err) {
-			// 同步抛出：记录真实错误，最终告警时截断展示
-			pr.lastError = err instanceof Error ? err.message : String(err);
-		}
-		pr.attempts += 1;
-		setTimeout(() => retryRollbackJump(pr), 300 * pr.attempts); // 递增退避：300ms → 600ms → 1200ms
-	}
+	// 决策窗口内拦截除 stop_watchdog 外的所有工具：这一回合只允许产出决策，
+	// 不产出需要保留的真实工作（这也让整段交换成为一个可整体折叠的封闭区间）。
+	// 被拦截的 toolCall + 它的 toolResult 成对落在折叠区间里，一起删除，不会破坏 tool_use 配对。
+	pi.on("tool_call", async (event) => {
+		if (decisionWindow === null) return;
+		if (event.toolName === TOOL_NAME) return;
+		return {
+			block: true,
+			reason:
+				"Watchdog decision turn: tools are blocked. Reply with a brief acknowledgement if work remains; " +
+				"the watchdog will send the continue instruction next. Otherwise call stop_watchdog.",
+		};
+	});
 
-	function retryRollbackJump(pr: NonNullable<typeof pendingRollback>) {
-		if (pendingRollback !== pr) return; // 命令已消费（或会话关闭已清理），跳板完成使命
-		if (pr.attempts >= 3) {
-			// 彻底放弃本次回滚：不清掉的话残留目标会在之后每个 agent_settled
-			// 反复重发跳板（且 attempts 已超限，每轮都会再告警一次）。
-			// 放弃的后果是良性的：催促交换留在上下文，不影响正确性。
-			pendingRollback = null;
-			// 异步 rejection 由 runtime 吞掉并打横幅，扩展侧拿不到；
-			// 未捕获到同步错误时，标注最可能的已知原因，截断后展示
-			const cause = pr.lastError
-				? truncateError(pr.lastError)
-				: "This operation was aborted（abort 窗口内 rejection 被 runtime 吞掉）";
-			activeCtx?.ui.notify(
-				`watchdog: 连发 3 次回滚请求都没成功，本次不回滚了。刚才那轮“催促 AI 继续干活”的对话会留在会话记录里，不影响使用。（原因：${cause}）`,
-				"warning",
-			);
-			return;
-		}
-		if (activeCtx && !activeCtx.isIdle()) {
-			// 有回合在跑：可能是上一次发送已落地，等它结束再决定是否重发
-			setTimeout(() => retryRollbackJump(pr), 600);
-			return;
-		}
-		sendRollbackJump();
-	}
+	// 决策回合的模型回复只是「还有活」的确认，会被折叠掉、没有上下文价值：落盘前剥掉，
+	// 避免它进会话文件与压缩摘要，也避免这段已折叠内容在 TUI 里以原始消息的形式再次出现。
+	// 只剥掉 text 块；tool_use 要与 toolResult 配对、thinking 块带签名需随 tool_use 回传，
+	// 都原样保留（否则 Anthropic 扩展思考 + 工具调用的回合会因缺块报错）。
+	// 剥离前把文字抄进决策卡片（TUI-only entry），卡片默认收成一行灰字提示。
+	pi.on("message_end", async (event) => {
+		if (decisionWindow === null) return;
+		if (event.message.role !== "assistant") return;
+		const content = (event.message as { content?: unknown }).content;
+		const hasToolCall =
+			Array.isArray(content) &&
+			content.some((block) => isRecord(block) && (block.type === "toolCall" || block.type === "tool_use"));
+		const text = textFromContent(content);
+		if (text) decisionWindow.replyText = text.slice(0, DECISION_REPLY_MAX_CHARS);
+		return {
+			message: {
+				...event.message,
+				content: hasToolCall
+					? (content as unknown[]).filter((block) => !(isRecord(block) && block.type === "text"))
+					: [],
+			},
+		};
+	});
 
 	pi.on("agent_settled", async (_event, ctx) => {
-		// stop_watchdog 刚被调用：把本次 nudge 交换从上下文砸尾回滚。
-		// 通过内部命令跳板拿到 command ctx（只有命令 handler 才有 navigateTree）。
-		// 注意放在 running 检查之前：stop 后 running 已是 false。
-		// 不在此处消费 pendingRollback，由 watchdog-internal 命令统一消费。
-		if (pendingRollback) sendRollbackJump();
+		// 决策窗口收口：这一回合的结果决定「继续」还是「停止」，并落下折叠终止标记。
+		// 必须放在 running 检查之前——stop_watchdog 已把 running 置 false，但我们仍要落 stop 标记。
+		const window = decisionWindow;
+		decisionWindow = null;
+		if (window !== null) {
+			// 用户在决策回合内插话 / 回合没回到空闲 → 这次检查作废（superseded）：
+			// 必须落终止标记，否则「无终态=保留」的保护会让决策提示词永久留在上下文里。
+			const superseded = !ctx.isIdle() || ctx.hasPendingMessages();
+			const outcome: DecisionCardData["outcome"] = window.stopCalled ? "stop" : superseded ? "superseded" : "continue";
+			if (window.stopCalled || superseded) {
+				pi.sendMessage(
+					{
+						customType: FOLD_MESSAGE_TYPE,
+						content: "",
+						display: false,
+						details: {
+							version: WATCHDOG_MESSAGE_VERSION,
+							exchangeId: window.exchangeId,
+							outcome,
+						},
+					},
+					{ triggerTurn: false },
+				);
+			} else {
+				// 模型没调 stop_watchdog → 还有活：发继续消息触发真正的工作回合。
+				// continuation 本身就是折叠区间的终止标记，也是整段交换里唯一保留下来的消息。
+				pi.sendMessage(
+					{
+						customType: CONTINUATION_MESSAGE_TYPE,
+						content: nudgeText(state.message || undefined),
+						display: true,
+						details: { version: WATCHDOG_MESSAGE_VERSION, exchangeId: window.exchangeId },
+					},
+					{ triggerTurn: true, deliverAs: "followUp" },
+				);
+			}
+			// 决策卡片：TUI-only，展示这次检查做了什么（结果 + AI 回复）。写在 sendMessage 之后，
+			// 让卡片在时间线上落在继续消息附近；CustomEntry 不进上下文，折叠语义不受影响。
+			pi.appendEntry<DecisionCardData>(DECISION_ENTRY_TYPE, {
+				version: WATCHDOG_MESSAGE_VERSION,
+				exchangeId: window.exchangeId,
+				outcome,
+				reply: window.replyText,
+				nudgeCount: state.nudgeCount,
+				maxNudges: state.maxNudges,
+				ts: Date.now(),
+			});
+		}
 		if (!state.running) return;
 		activeCtx = ctx;
 		armCountdown(ctx); // AI 停止输出（含重试/排队都结束后），重新倒计时
@@ -626,8 +806,8 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async (event, ctx) => {
 		// reload 只是毫秒级重绑扩展，不应向状态集成广播一次假完成。
+		decisionWindow = null;
 		teardown(ctx, true, event.reason !== "reload");
-		pendingRollback = null;
 	});
 
 	// ---------- 给 AI 的停止工具 ----------
@@ -660,11 +840,8 @@ export default function (pi: ExtensionAPI) {
 					spawn("sh", ["-c", onStop], { stdio: "ignore", detached: true }).unref();
 				}
 				teardown(ctx, false);
-				// 记录待回滚标记：agent_settled 后经内部命令砸尾，把 nudge 交换从上下文移除
-				if (rollbackMark) {
-					pendingRollback = { ...rollbackMark, attempts: 0 };
-					rollbackMark = null;
-				}
+				// 决策窗口内调用 = 决策结果为「停止」；折叠终止标记在 agent_settled 里落
+				if (decisionWindow !== null) decisionWindow.stopCalled = true;
 				const suspendedNow = state.keepAlive;
 				ctx.ui.notify(
 					suspendedNow
@@ -766,42 +943,6 @@ export default function (pi: ExtensionAPI) {
 					);
 					break;
 				}
-			}
-		},
-	});
-
-	// ---------- 内部回滚命令 ----------
-	// 隐藏命令（无 description，不进补全列表）：唯一调用方是 agent_settled 里的
-	// sendUserMessage 跳板，作用是把命令专属的 command ctx（含 navigateTree）带进扩展。
-	pi.registerCommand("watchdog-internal", {
-		handler: async (args, cmdCtx) => {
-			const pr = pendingRollback;
-			pendingRollback = null; // 只在命令里消费一次
-			if (!pr) return;
-			const target = /(?:^|\s)target=(\S+)/.exec(args)?.[1];
-			if (!target || target !== pr.leafId) return; // 参数不匹配（防误调）
-			const sm: any = cmdCtx.sessionManager;
-			if (!validateRollbackTail(sm, target, pr.nudgeFullText)) {
-				// 尾部有真活，放弃回滚并明示原因（否则静默失败无从排查）
-				cmdCtx.ui.notify(
-					"watchdog: 没有回滚：停止之后会话里又出现了新的真实对话内容（不是刚才那轮催促），删掉会连带删掉它们。",
-					"warning",
-				);
-				return;
-			}
-			try {
-				await (cmdCtx as any).navigateTree(target, { summarize: false });
-				cmdCtx.ui.notify(
-					"watchdog: 已回滚：把刚才那轮“催促 AI 继续干活”的对话从会话记录里删掉了，上下文回到催促前。",
-					"info",
-				);
-			} catch (err) {
-				// navigateTree 失败则保留现状（nudge 交换留在上下文，不影响正确性），但要可见
-				const msg = err instanceof Error ? err.message : String(err);
-				cmdCtx.ui.notify(
-					`watchdog: 没有回滚：切回之前的会话位置时出错（${msg}）。刚才那轮“催促 AI 继续干活”的对话会留在会话记录里，不影响使用。`,
-					"warning",
-				);
 			}
 		},
 	});

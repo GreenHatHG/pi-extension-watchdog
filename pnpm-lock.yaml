@@ -176,6 +176,9 @@ importers:
       '@biomejs/biome':
         specifier: ^2.5.14
         version: 2.5.14
+      '@earendil-works/pi-tui':
+        specifier: ^0.85.1
+        version: 0.85.1
       '@types/node':
         specifier: ^22.20.3
         version: 22.20.3
@@ -1909,25 +1912,35 @@ snapshots:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.6.0
 
-  '@mariozechner/clipboard-darwin-arm64@0.3.9': {}
+  '@mariozechner/clipboard-darwin-arm64@0.3.9':
+    optional: true
 
-  '@mariozechner/clipboard-darwin-universal@0.3.9': {}
+  '@mariozechner/clipboard-darwin-universal@0.3.9':
+    optional: true
 
-  '@mariozechner/clipboard-darwin-x64@0.3.9': {}
+  '@mariozechner/clipboard-darwin-x64@0.3.9':
+    optional: true
 
-  '@mariozechner/clipboard-linux-arm64-gnu@0.3.9': {}
+  '@mariozechner/clipboard-linux-arm64-gnu@0.3.9':
+    optional: true
 
-  '@mariozechner/clipboard-linux-arm64-musl@0.3.9': {}
+  '@mariozechner/clipboard-linux-arm64-musl@0.3.9':
+    optional: true
 
-  '@mariozechner/clipboard-linux-riscv64-gnu@0.3.9': {}
+  '@mariozechner/clipboard-linux-riscv64-gnu@0.3.9':
+    optional: true
 
-  '@mariozechner/clipboard-linux-x64-gnu@0.3.9': {}
+  '@mariozechner/clipboard-linux-x64-gnu@0.3.9':
+    optional: true
 
-  '@mariozechner/clipboard-linux-x64-musl@0.3.9': {}
+  '@mariozechner/clipboard-linux-x64-musl@0.3.9':
+    optional: true
 
-  '@mariozechner/clipboard-win32-arm64-msvc@0.3.9': {}
+  '@mariozechner/clipboard-win32-arm64-msvc@0.3.9':
+    optional: true
 
-  '@mariozechner/clipboard-win32-x64-msvc@0.3.9': {}
+  '@mariozechner/clipboard-win32-x64-msvc@0.3.9':
+    optional: true
 
   '@mariozechner/clipboard@0.3.9':
     optionalDependencies:
@@ -1941,6 +1954,7 @@ snapshots:
       '@mariozechner/clipboard-linux-x64-musl': 0.3.9
       '@mariozechner/clipboard-win32-arm64-msvc': 0.3.9
       '@mariozechner/clipboard-win32-x64-msvc': 0.3.9
+    optional: true
 
   '@oxc-project/types@0.150.0': {}
 

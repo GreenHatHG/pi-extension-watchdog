@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { nudgeText as nudge } from "../index.ts";
-import { setup } from "./helpers/setup.js";
+import { nudgeMessages, setup } from "./helpers/setup.js";
 
 beforeEach(() => {
 	vi.useFakeTimers();
@@ -13,23 +12,23 @@ afterEach(() => {
 it("keep 模式：超时催促 → AI 调 stop_watchdog 仅挂起 → interactive 新消息自动恢复", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1 mode=keep message=常驻测试", rt.ctx);
-	await vi.advanceTimersByTimeAsync(1100);
-	expect(rt.sentMessages.filter((m) => m === nudge("常驻测试"))).toHaveLength(1);
+	await vi.advanceTimersByTimeAsync(1100); // 决策回合
+	expect(nudgeMessages(rt)).toHaveLength(1);
 
-	// AI 调用 stop_watchdog → 挂起而非关闭
+	// 决策回合内 AI 调用 stop_watchdog → 挂起而非关闭
 	const r = await rt.tools.get("stop_watchdog").execute("t10", {}, undefined, undefined, rt.ctx);
 	expect(JSON.stringify(r.content)).toContain("OK.");
 	expect(rt.activeTools.has("stop_watchdog")).toBe(true);
 
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1300);
-	expect(rt.sentMessages.filter((m) => m === nudge("常驻测试"))).toHaveLength(1); // 挂起期间不催促
+	expect(nudgeMessages(rt)).toHaveLength(1); // 挂起期间不催促
 
 	// 用户发新消息 → 自动恢复
 	await rt.emit("input", { text: "新任务", source: "interactive" });
 	expect(rt.notifications.some((n) => n.msg.includes("已恢复"))).toBe(true);
 	await vi.advanceTimersByTimeAsync(1200);
-	expect(rt.sentMessages.filter((m) => m === nudge("常驻测试"))).toHaveLength(2);
+	expect(nudgeMessages(rt)).toHaveLength(2);
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });
 
@@ -72,16 +71,17 @@ it("keep 模式：挂起中手动 stop → 彻底关闭", async () => {
 	expect(rt.notifications.some((n) => n.msg.includes("未在运行"))).toBe(true);
 });
 
-it("keep 模式：达到 max 上限 → 兕底彻底关闭，新消息不恢复", async () => {
+it("keep 模式：达到 max 上限 → 彻底关闭，新消息不恢复", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1 max=1 mode=keep message=常驻上限", rt.ctx);
 	await rt.settleAfterRun();
-	await vi.advanceTimersByTimeAsync(1100);
-	expect(rt.sentMessages.filter((m) => m === nudge("常驻上限"))).toHaveLength(1);
+	await vi.advanceTimersByTimeAsync(1100); // 决策回合 1
+	expect(nudgeMessages(rt)).toHaveLength(1);
+	await rt.settleAfterRun(); // 决策回合结束 → 继续消息
+	await rt.settleAfterRun(); // 工作回合结束 → 倒计时
 
-	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1100); // 第 2 次被拦截，常驻也彻底关闭
-	expect(rt.sentMessages.filter((m) => m === nudge("常驻上限"))).toHaveLength(1);
+	expect(nudgeMessages(rt)).toHaveLength(1);
 	expect(rt.notifications.some((n) => n.msg.includes("已自动停止"))).toBe(true);
 	expect(rt.activeTools.has("stop_watchdog")).toBe(true); // 常驻注册：工具始终保留，不再随启停移出
 
@@ -96,17 +96,17 @@ it("PI_WATCHDOG mode=keep：自动以常驻模式启动，挂起后新消息恢�
 	await rt.emit("session_start", { reason: "startup" });
 	expect(rt.notifications.some((n) => n.msg.includes("常驻模式") && n.msg.includes("监控已启动"))).toBe(true);
 
-	await vi.advanceTimersByTimeAsync(1300);
-	expect(rt.sentMessages.at(-1)).toBe(nudge("常驻env文案"));
+	await vi.advanceTimersByTimeAsync(1300); // 决策回合
+	expect(nudgeMessages(rt)).toHaveLength(1);
 
-	const r = await rt.tools.get("stop_watchdog").execute("t11", {}, undefined, undefined, rt.ctx);
+	const r = await rt.tools.get("stop_watchdog").execute("t11", {}, undefined, undefined, rt.ctx); // 决策窗口内 → 挂起
 	expect(JSON.stringify(r.content)).toContain("OK.");
 
 	await rt.emit("input", { text: "继续新任务", source: "interactive" });
 	expect(rt.notifications.some((n) => n.msg.includes("已恢复"))).toBe(true);
-	await rt.settleAfterRun(); // 恢复消息触发的一轮运行结束
+	await rt.settleAfterRun(); // 结算被挂起打断的决策回合
 	await vi.advanceTimersByTimeAsync(2300); // ticker 恢复倒计时（≤1s）+ 超时 1s
-	expect(rt.sentMessages.filter((m) => m === nudge("常驻env文案")).length).toBeGreaterThanOrEqual(2);
+	expect(nudgeMessages(rt).length).toBeGreaterThanOrEqual(2);
 
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 	expect(rt.activeTools.has("stop_watchdog")).toBe(true); // 常驻注册：工具始终保留，不再随启停移出
