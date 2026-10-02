@@ -58,6 +58,8 @@ export interface DecisionCardData {
 	outcome: "continue" | "stop" | "superseded";
 	/** 决策回合里 AI 的回复文本（已截断）；被拦截工具调用附带的文字也在此 */
 	reply?: string;
+	/** outcome=stop 且处于常驻模式：监控只是挂起（下次发消息自动恢复），而非彻底关闭 */
+	suspended?: boolean;
 	nudgeCount: number;
 	maxNudges: number;
 	ts: number;
@@ -277,11 +279,16 @@ class DecisionCardComponent implements Component {
 	private build(): Box {
 		const { data, theme } = this;
 		const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
+		// stop 时把「挂起（常驻）还是彻底停止」并进同一行，避免再发一条独立 notify 污染时间线
+		const label =
+			data.outcome === "stop" && data.suspended
+				? "AI 主动停止（常驻监控挂起，下次发消息恢复）"
+				: DECISION_OUTCOME_LABEL[data.outcome];
 		box.addChild(
 			new Text(
 				`${theme.fg("muted", "⏱")} ${theme.fg(
 					DECISION_OUTCOME_COLOR[data.outcome],
-					DECISION_OUTCOME_LABEL[data.outcome],
+					label,
 				)} ${theme.fg("dim", `(第 ${data.nudgeCount}/${data.maxNudges} 次检查)`)}`,
 				0,
 				0,
@@ -580,7 +587,6 @@ export default function (pi: ExtensionAPI) {
 				},
 				{ triggerTurn: true, deliverAs: "steer" },
 			);
-			ctx.ui.notify(`watchdog: 已发起继续检查 (${state.nudgeCount}/${state.maxNudges})`, "info");
 		} catch {
 			// 极小概率竞态：发送瞬间 AI 开始运行。不计入次数，等 agent_settled 重新倒计时
 			decisionWindow = null;
@@ -764,12 +770,32 @@ export default function (pi: ExtensionAPI) {
 	pi.on("message_end", async (event) => {
 		if (decisionWindow === null) return;
 		if (event.message.role !== "assistant") return;
-		const content = (event.message as { content?: unknown }).content;
+		const message = event.message as { content?: unknown; stopReason?: unknown; errorMessage?: unknown };
+		const content = message.content;
 		const hasToolCall =
 			Array.isArray(content) &&
 			content.some((block) => isRecord(block) && (block.type === "toolCall" || block.type === "tool_use"));
 		const text = textFromContent(content);
 		if (text) decisionWindow.replyText = text.slice(0, DECISION_REPLY_MAX_CHARS);
+		// stop_watchdog 会 abort 当前回合（截断模型收尾文字）。会话日志实测：这次中止会被落成
+		// 一条 stopReason "error"、errorMessage "This operation was aborted"、content 为空的
+		// 幻影 assistant 消息，TUI 会把它渲染成红字 "Error: ..."。
+		// 决策窗口里的中止是我们主动发起的预期行为：整条清成空消息，界面上不留任何痕迹。
+		// 两个刻意的取舍：
+		//   1) 只认 "error"，不认 "aborted"：用户按 ESC 走的是 stopReason "aborted"，
+		//      重写它会让 runWasAborted 失效、丢掉「已被 ESC 打断」的检测。
+		//   2) 这里直接 return，不再抄 replyText：幻影消息按定义 content 为空，
+		//      决策文字在带 tool_use 的那条消息里已被抄录。
+		if (decisionWindow.stopCalled && message.stopReason === "error") {
+			return {
+				message: {
+					...event.message,
+					content: [],
+					stopReason: "stop",
+					errorMessage: undefined,
+				} as typeof event.message,
+			};
+		}
 		return {
 			message: {
 				...event.message,
@@ -824,6 +850,7 @@ export default function (pi: ExtensionAPI) {
 				exchangeId: window.exchangeId,
 				outcome,
 				reply: window.replyText,
+				suspended: outcome === "stop" && state.keepAlive,
 				nudgeCount: state.nudgeCount,
 				maxNudges: state.maxNudges,
 				ts: Date.now(),
@@ -863,6 +890,12 @@ export default function (pi: ExtensionAPI) {
 			label: "停止自动继续",
 			description: "Ends the turn immediately; call only after a watchdog nudge when no work remains.",
 			parameters: Type.Object({}),
+			// 工具行对用户是纯协议噪音（决策卡片已是唯一摘要）：renderShell:"self" + 渲染零行的空 Text
+			// 让整个 call/result 行不输出任何内容（含构造器里的 Spacer）。注意不能依赖 hideComponent——
+			// 只要 renderCall 存在且不抛异常，组件就会认为 hasContent=true，隐藏逻辑不会触发。
+			renderShell: "self",
+			renderCall: () => new Text("", 0, 0),
+			renderResult: () => new Text("", 0, 0),
 			async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
 				if (!state.running) {
 					return {
@@ -884,15 +917,8 @@ export default function (pi: ExtensionAPI) {
 					spawn("sh", ["-c", onStop], { stdio: "ignore", detached: true }).unref();
 				}
 				teardown(ctx, false);
-				// 决策窗口内调用 = 决策结果为「停止」；折叠终止标记在 agent_settled 里落
+				// 决策窗口内调用 = 决策结果为「停止」；折叠终止标记与决策卡片（含挂起/已停止状态）在 agent_settled 里落
 				if (decisionWindow !== null) decisionWindow.stopCalled = true;
-				const suspendedNow = state.keepAlive;
-				ctx.ui.notify(
-					suspendedNow
-						? "watchdog: AI 已调用 stop_watchdog，常驻监控挂起（下次发消息自动恢复）"
-						: "watchdog: AI 已调用 stop_watchdog，监控已停止（回合结束）",
-					"info",
-				);
 				// 模拟用户按 ESC（app.interrupt）：stop_watchdog 之后 AI 通常只剩收尾文字或多余动作，
 				// 直接中止当前回合，强行截断 LLM 的后续回复。与 ESC 走同一路径（agent.abort()）。
 				if (!ctx.isIdle()) ctx.abort();

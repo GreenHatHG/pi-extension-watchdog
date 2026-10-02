@@ -6,6 +6,7 @@
 
 ### 改变
 
+- **TUI 去噪：一次检查只留一张决策卡片**。发起检查不再发 `ui.notify`（info 通知在 pi 里是永久时间线行）；`stop_watchdog` 的调用/结果行被隐藏（`renderShell: "self"` + 空 `renderCall`/`renderResult`）；`ctx.abort()` 产生的幻影 `Error: This operation was aborted` 消息在决策窗口内被清成空消息。常驻模式下「挂起 vs 已停止」直接标注在卡片上，不再另发提示行。
 - **催促拆成「决策回合 + 继续消息」**：空闲超时后先发一条禁止干活的决策消息（除 `stop_watchdog` 外的工具被拦截），AI 回文字 = 还有活，watchdog 随即发继续消息触发真正的工作回合；AI 调 `stop_watchdog` = 停止。
 - **上下文回滚（beta，opt-in）→ 上下文折叠（默认开启）**：决策交换在每次 provider 请求前被移除（决策消息 + AI 回复 + 被拦截的工具对），只保留继续消息；非破坏性，不改写会话记录，无需 `navigateTree` / 命令跳板。
 

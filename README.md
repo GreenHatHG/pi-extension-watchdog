@@ -111,12 +111,20 @@ AI 停止输出、进入空闲后开始倒计时；倒计时期间 AI 再次运�
   - 回一句文字 = 还有活；或
   - 调 `stop_watchdog` = 没活 / 在等你。
 
-  AI 的这句回复会在落盘前被剥离（带 `stop_watchdog` 时也只保留工具调用块以维持配对），不会进会话文件与压缩摘要。每次检查的结果会以一张**决策卡片**留在 TUI 时间线里（`pi-watchdog:decision`，TUI-only entry）：显示这次是「继续 / AI 主动停止 / 用户接管作废」；已折叠的 AI 回复默认收成一行灰字提示，全屏下点击卡片或按 `ctrl+o` 展开才看全文（落盘截断 300 字）。卡片不进模型上下文，也不参与折叠。
+  AI 的这句回复会在落盘前被剥离（带 `stop_watchdog` 时也只保留工具调用块以维持配对），不会进会话文件与压缩摘要。每次检查的结果会以一张**决策卡片**留在 TUI 时间线里（`pi-watchdog:decision`，TUI-only entry）：显示这次是「继续 / AI 主动停止 / 用户接管作废」；已折叠的 AI 回复默认收成一行灰字提示，全屏下点击卡片或按 `ctrl+o` 展开才看全文（落盘截断 300 字）。卡片不进模型上下文，也不参与折叠。常驻模式下 AI 主动停止时，卡片直接标注「常驻监控挂起，下次发消息恢复」，不再另发一条提示行。
 - **继续消息**：决策结果为「继续」时才发出，是真正触发工作回合的那条。固定触发行 + 可选追加指令：
   > [Automated, not user input] If work remains, continue working (no reply needed). If waiting on a user decision, don't change code — state what you need, then call stop_watchdog as your final action. If no work remains and no decision is pending, call stop_watchdog to end the turn.
 
   它按「AI 为什么停下」分三种情况给出对应动作：还有活就继续干（无需回复）；在等用户决策就不改代码，说明需要什么后以 `stop_watchdog` 收尾；没活也没待决策就调 `stop_watchdog` 结束回合。开头的 `[Automated, not user input]` 前缀让 AI 知道这不是真用户发言，不会把它当成新的用户指令。
 - **追加指令**：可选。`message=` 设置的文案不会替换触发行，而是作为 `Task instruction` 追加在继续消息之后，保证自定义文案不会丢失触发行「继续干活 / 等决策时说明需求 / 主动停止」的核心语义。
+
+### TUI 上的痕迹
+
+一次检查在时间线上只留**一张决策卡片**，其余中间过程都不上屏：
+
+- 发起检查时不再发 `ui.notify`（info 通知在 pi 里是**永久**时间线行，不是临时 toast）——检查次数由卡片与状态栏体现。
+- `stop_watchdog` 的调用/结果行被隐藏（`renderShell: "self"` + 渲染零行的空 `renderCall`/`renderResult`）；工具本身照常注册、照常进模型上下文。
+- `stop_watchdog` 触发的回合中止（`ctx.abort()`）可能被 provider 落成一条 `stopReason: "error"` 的幻影 assistant 消息，TUI 会渲染成红字 `Error: ...`。决策窗口内这条消息被清成空消息，界面上不留痕迹；决策窗口外的真实错误不受影响。
 
 状态栏实时显示（倒计时秒数、已催促次数会随实际情况变化）：
 

@@ -148,3 +148,90 @@ it("决策卡片在 fullscreen 下可点击展开、再点击收起", async () =
 	view.handleMouse(clickLeft);
 	expect(view.render(80).join("\n")).toContain("决策回复已折叠");
 });
+
+it("keep 模式下的 stop 卡片记录挂起态，并渲染「常驻监控挂起」文案", async () => {
+	const rt = await setup();
+	await rt.commands.get("watchdog").handler("timeout=1 mode=keep", rt.ctx);
+	await rt.settleAfterRun();
+	await vi.advanceTimersByTimeAsync(1100);
+	await rt.tools.get("stop_watchdog").execute("t1", {}, undefined, undefined, rt.ctx);
+	await rt.settleAfterRun();
+
+	const found = cards(rt);
+	expect(found[0]).toMatchObject({ outcome: "stop", suspended: true });
+
+	const renderer = rt.entryRenderers.get(DECISION_ENTRY_TYPE);
+	const line = renderer!({ customType: DECISION_ENTRY_TYPE, data: found[0] }, { expanded: false }, theme)
+		.render(120)
+		.join("\n");
+	expect(line).toContain("常驻监控挂起");
+});
+
+it("once 模式下的 stop 卡片不带挂起态", async () => {
+	const rt = await setup();
+	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx);
+	await rt.settleAfterRun();
+	await vi.advanceTimersByTimeAsync(1100);
+	await rt.tools.get("stop_watchdog").execute("t1", {}, undefined, undefined, rt.ctx);
+	await rt.settleAfterRun();
+
+	expect(cards(rt)[0]).toMatchObject({ outcome: "stop", suspended: false });
+});
+
+it("stop 后 abort 产生的幻影 error 消息在决策窗口被清成空消息", async () => {
+	const rt = await setup();
+	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx);
+	await rt.settleAfterRun();
+	await vi.advanceTimersByTimeAsync(1100); // 决策窗口开启
+
+	// 决策窗口里真实的错误不能被吞掉（未调用 stop_watchdog 时原样保留）
+	const real = await rt.emitMessageEnd({
+		role: "assistant",
+		content: [],
+		stopReason: "error",
+		errorMessage: "boom",
+	});
+	expect(real.message.stopReason).toBe("error");
+	expect(real.message.errorMessage).toBe("boom");
+
+	await rt.tools.get("stop_watchdog").execute("t1", {}, undefined, undefined, rt.ctx);
+	const phantom = await rt.emitMessageEnd({
+		role: "assistant",
+		content: [],
+		stopReason: "error",
+		errorMessage: "This operation was aborted",
+	});
+	expect(phantom.message.stopReason).toBe("stop");
+	expect(phantom.message.content).toEqual([]);
+	expect(phantom.message.errorMessage).toBeUndefined();
+});
+
+it("用户 ESC（stopReason aborted）不被 rewrite，保住 runWasAborted 检测", async () => {
+	const rt = await setup();
+	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx);
+	await rt.settleAfterRun();
+	await vi.advanceTimersByTimeAsync(1100); // 决策窗口开启
+
+	// 用户插话后自己按 ESC：不能在 stopCalled 分支里被误碰
+	await rt.tools.get("stop_watchdog").execute("t1", {}, undefined, undefined, rt.ctx);
+	const escaped = await rt.emitMessageEnd({
+		role: "assistant",
+		content: [],
+		stopReason: "aborted",
+		errorMessage: "Operation aborted",
+	});
+	expect(escaped.message.stopReason).toBe("aborted");
+	expect(escaped.message.errorMessage).toBe("Operation aborted");
+});
+
+it("stop_watchdog 的工具行渲染为空（renderShell:self + 空 renderCall/renderResult）", async () => {
+	const rt = await setup();
+	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx); // 懒注册工具
+	const tool = rt.tools.get("stop_watchdog");
+	expect(tool.renderShell).toBe("self");
+	const ctxArg = { args: {}, toolCallId: "t1", state: {}, expanded: false, isPartial: false };
+	expect(tool.renderCall({}, theme, ctxArg).render(80)).toEqual([]);
+	expect(
+		tool.renderResult({ content: [], details: {} }, { expanded: false, isPartial: false }, theme, ctxArg).render(80),
+	).toEqual([]);
+});
