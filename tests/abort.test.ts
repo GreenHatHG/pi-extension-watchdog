@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { nudgeText as nudge } from "../index.ts";
-import { nudgeMessages, setup } from "./helpers/setup.js";
+import { DECISION_ENTRY_TYPE, nudgeText as nudge } from "../index.ts";
+import { continuationMessages, nudgeMessages, setup } from "./helpers/setup.js";
 
 beforeEach(() => {
 	vi.useFakeTimers();
@@ -111,6 +111,56 @@ it("扩展来源的新一轮不算用户回归，只有真实用户消息才解�
 	expect(rt.sentMessages.at(-1)).toBe(nudge("扩展来源"));
 
 	await rt.settleAfterRun();
+	await rt.commands.get("watchdog").handler("stop", rt.ctx);
+});
+
+it("决策回合被 ESC 中止 → 不发继续消息，卡片记为 superseded，本次空闲不再催促", async () => {
+	const rt = await setup();
+	const states: any[] = [];
+	rt.pi.events.on("watchdog:state", (s: unknown) => states.push(s));
+
+	await rt.commands.get("watchdog").handler("timeout=1 message=决策中止", rt.ctx);
+	await rt.settleAfterRun();
+	await vi.advanceTimersByTimeAsync(1100); // 倒计时归零 → 发决策消息，decisionWindow 打开
+	expect(nudgeMessages(rt)).toHaveLength(1);
+
+	await rt.settleAbortedTurn(); // 用户按 ESC 中止决策回合
+
+	// 修复前这里会被判成「还有活 → 继续」发出 continuation，触发新一轮
+	expect(continuationMessages(rt)).toHaveLength(0);
+	expect(states.at(-1)).toMatchObject({ running: true, interrupted: true });
+
+	const cards = rt.entries.filter((e) => e.customType === DECISION_ENTRY_TYPE).map((e) => e.data as any);
+	expect(cards.at(-1)).toMatchObject({ outcome: "superseded" });
+
+	// interrupted 让本次空闲不再倒计时/催促
+	await vi.advanceTimersByTimeAsync(5000);
+	expect(nudgeMessages(rt)).toHaveLength(1);
+	expect(rt.statusBars.get("watchdog")).toContain("⏹");
+
+	await rt.commands.get("watchdog").handler("stop", rt.ctx);
+});
+
+it("决策回合内插话后又按 ESC → 提示插话可能未被处理，且不发继续消息", async () => {
+	const rt = await setup();
+	await rt.commands.get("watchdog").handler("timeout=1 message=插话中止", rt.ctx);
+	await rt.settleAfterRun();
+	await vi.advanceTimersByTimeAsync(1100); // decisionWindow 打开
+
+	rt.notifications.length = 0;
+	// 中止的 run 里混入一条真实 user 消息（决策提示词是 role:"custom"，不算）
+	await rt.emit("agent_end", {
+		messages: [
+			{ role: "user", content: "插话内容" },
+			{ role: "assistant", content: [], stopReason: "aborted" },
+		],
+	});
+	rt.state.idle = true;
+	await rt.emit("agent_settled");
+
+	expect(rt.notifications.some((n) => n.msg.includes("可能未被处理"))).toBe(true);
+	expect(continuationMessages(rt)).toHaveLength(0);
+
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });
 

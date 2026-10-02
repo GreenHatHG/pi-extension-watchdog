@@ -358,7 +358,13 @@ export default function (pi: ExtensionAPI) {
 	 * 决策窗口：决策消息发出 → 该回合 settle 之间。窗口内除 stop_watchdog 外的工具全部拦截，
 	 * 保证这一回合只产出可折叠的决策交换，不产出需要保留的真实工作。
 	 */
-	let decisionWindow: { exchangeId: string; stopCalled: boolean; replyText?: string } | null = null;
+	let decisionWindow: {
+		exchangeId: string;
+		stopCalled: boolean;
+		replyText?: string;
+		/** 决策回合被用户 ESC 中止：按 superseded 收口，不再发继续消息 */
+		aborted?: boolean;
+	} | null = null;
 	let exchangeCounter = 0;
 
 	/** 生成一次决策交换的关联 id（决定哪些消息属于同一可折叠区间） */
@@ -755,11 +761,23 @@ export default function (pi: ExtensionAPI) {
 	// 记下「这一轮是被中止的」（用户按 ESC 等），供 armCountdown 判断本次空闲是否还该催促。
 	// stop_watchdog 自己也会 abort，但它先 teardown 把 running 置为 false，所以不会误记。
 	// 时序安全：pi 保证扩展的 agent_end handler 执行完后才发 agent_settled，所以 settled 里读到的一定是新值。
-	pi.on("agent_end", async (event, _ctx) => {
-		if (state.running && runWasAborted(event.messages)) {
-			state.interrupted = true;
-			publishState();
+	pi.on("agent_end", async (event, ctx) => {
+		if (!state.running || !runWasAborted(event.messages)) return;
+		state.interrupted = true;
+		if (decisionWindow !== null) {
+			// 决策回合被 ESC 中止 = 用户接管：记为 superseded，agent_settled 里不再发继续消息。
+			decisionWindow.aborted = true;
+			// 边缘场景：中止前用户已排入一条真实消息（role:"user"，决策提示词是 role:"custom"），
+			// 它可能已被这一轮 LLM 消费、不会重投；折叠本次检查后提示用户重发。
+			if (
+				Array.isArray(event.messages) &&
+				event.messages.some((m) => (m as { role?: unknown } | undefined)?.role === "user")
+			) {
+				ctx.ui.notify("watchdog: 决策回合被中止，你期间发送的消息可能未被处理，请重发", "warning");
+			}
 		}
+		renderStatus(ctx); // 立即把状态栏切到 ⏱⏹，不等 agent_settled 再刷新
+		publishState();
 	});
 
 	// 决策回合的模型回复只是「还有活」的确认，会被折叠掉、没有上下文价值：落盘前剥掉，
@@ -812,9 +830,9 @@ export default function (pi: ExtensionAPI) {
 		const window = decisionWindow;
 		decisionWindow = null;
 		if (window !== null) {
-			// 用户在决策回合内插话 / 回合没回到空闲 → 这次检查作废（superseded）：
+			// 用户在决策回合内插话 / 回合没回到空闲 / 被 ESC 中止 → 这次检查作废（superseded）：
 			// 必须落终止标记，否则「无终态=保留」的保护会让决策提示词永久留在上下文里。
-			const superseded = !ctx.isIdle() || ctx.hasPendingMessages();
+			const superseded = !ctx.isIdle() || ctx.hasPendingMessages() || window.aborted === true;
 			const outcome: DecisionCardData["outcome"] = window.stopCalled ? "stop" : superseded ? "superseded" : "continue";
 			if (window.stopCalled || superseded) {
 				pi.sendMessage(
