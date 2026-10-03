@@ -6,7 +6,6 @@ import {
 	FOLD_MESSAGE_TYPE,
 	foldWatchdogContext,
 	continuationText as nudge,
-	WATCHDOG_MESSAGE_VERSION,
 } from "../index.ts";
 import { continuationMessages, nudgeMessages, setup } from "./helpers/setup.js";
 
@@ -17,21 +16,21 @@ const nudgeMsg = (exchangeId = EXCHANGE) => ({
 	customType: DECISION_MESSAGE_TYPE,
 	content: DECISION_MESSAGE,
 	display: false,
-	details: { version: WATCHDOG_MESSAGE_VERSION, exchangeId },
+	details: { exchangeId },
 });
 const continuationMsg = (exchangeId = EXCHANGE) => ({
 	role: "custom",
 	customType: CONTINUATION_MESSAGE_TYPE,
 	content: nudge(),
 	display: true,
-	details: { version: WATCHDOG_MESSAGE_VERSION, exchangeId },
+	details: { exchangeId },
 });
 const stopMarker = (exchangeId = EXCHANGE) => ({
 	role: "custom",
 	customType: FOLD_MESSAGE_TYPE,
 	content: "",
 	display: false,
-	details: { version: WATCHDOG_MESSAGE_VERSION, exchangeId, outcome: "stop" },
+	details: { exchangeId, outcome: "stop" },
 });
 const assistant = (content: unknown[]) => ({ role: "assistant", content });
 const toolResult = (toolCallId: string, toolName: string) => ({
@@ -116,6 +115,18 @@ it("无终态且后面已有新用户消息 → 原样保留", () => {
 	expect(foldWatchdogContext(messages)).toEqual(messages);
 });
 
+it("旧落盘消息 details 带未知字段（如旧版 version）仍正常折叠", () => {
+	const legacyNudge = {
+		role: "custom",
+		customType: DECISION_MESSAGE_TYPE,
+		content: DECISION_MESSAGE,
+		display: false,
+		details: { version: 1, exchangeId: EXCHANGE },
+	};
+	const messages = [user("task"), legacyNudge, assistant([]), continuationMsg(), user("later")];
+	expect(foldWatchdogContext(messages)).toEqual([user("task"), continuationMsg(), user("later")]);
+});
+
 it("superseded 折叠标记同样终止区间", () => {
 	const messages = [
 		user("task"),
@@ -126,7 +137,7 @@ it("superseded 折叠标记同样终止区间", () => {
 			customType: FOLD_MESSAGE_TYPE,
 			content: "",
 			display: false,
-			details: { version: WATCHDOG_MESSAGE_VERSION, exchangeId: EXCHANGE, outcome: "superseded" },
+			details: { exchangeId: EXCHANGE, outcome: "superseded" },
 		},
 	];
 	expect(foldWatchdogContext(messages)).toEqual([user("task")]);
@@ -150,7 +161,6 @@ it("context 钩子：决策回合结束后请求视图里不再有决策交换",
 	await rt.commands.get("watchdog").handler("timeout=1 message=折叠测试", rt.ctx);
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1100); // 决策回合
-	expect(rt.entries.some((e) => e.customType === "pi-watchdog:nudge-marker")).toBe(true);
 	await rt.settleAfterRun(); // 决策回合结束（模型没调 stop）→ 继续消息
 
 	const folded = (await rt.emitContext(rt.currentMessages())) as any[];

@@ -96,7 +96,6 @@ it("决策卡片渲染器：折叠时只给灰字提示，展开后给回复全�
 	expect(renderer).toBeTypeOf("function");
 
 	const data: DecisionCardData = {
-		version: 1,
 		exchangeId: "w1",
 		outcome: "continue",
 		reply: "still working on it",
@@ -119,7 +118,6 @@ it("决策卡片在 fullscreen 下可点击展开、再点击收起", async () =
 	const rt = await setup();
 	const renderer = rt.entryRenderers.get(DECISION_ENTRY_TYPE);
 	const data: DecisionCardData = {
-		version: 1,
 		exchangeId: "click-1",
 		outcome: "continue",
 		reply: "still working on it",

@@ -18,7 +18,7 @@
 
 - 决策卡片（`pi-watchdog:decision`）：每次决策检查结算后写一张 TUI-only `appendEntry` 卡片，展示结果（继续 / AI 主动停止 / 用户接管作废）；已折叠的 AI 回复默认收成一行灰字，全屏点击卡片或 `ctrl+o` 展开看全文（落盘截断 300 字）；不进模型上下文、不参与折叠，`/resume` 后历史卡片照常渲染。
 - `pi.on("context")` 折叠钩子与 `foldWatchdogContext` 纯函数（跨 resume/reload 成立，关联不完整时 fail closed）。
-- 决策消息改为带 `exchangeId` 的 CustomMessage（`pi-watchdog:nudge` / `:continuation` / `:fold`），并写 `appendEntry` marker 做持久关联。
+- 决策消息改为带 `exchangeId` 的 CustomMessage（`pi-watchdog:nudge` / `:continuation` / `:fold`），折叠关联只靠消息自身的 `customType` + `exchangeId`，不依赖额外落盘信息。
 - 决策回合的模型回复在落盘前被剥离（带工具调用时只保留工具调用块），避免这段已折叠内容在 TUI 里以原始消息的形式重复出现；剥离前的内容改由决策卡片收起展示。
 - 决策期间用户插话 / 回合没回到空闲时写 `superseded` 终点标记，整段交换照样被折叠，不会把决策提示词永久留在上下文。
 - 用户按 `Esc` 中止一轮后，watchdog 不再继续催促（状态栏 `⏱⏹`）：本次空闲不开始倒计时，等用户发下一条消息、AI 重新运行后自动恢复。`watchdog:state` 事件会广播 `interrupted` 字段。

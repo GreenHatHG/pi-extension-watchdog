@@ -35,8 +35,6 @@ const ACTIVITY_GRACE_MS = 2000;
 
 const TOOL_NAME = "stop_watchdog";
 
-/** decision/continuation/fold 三类可折叠消息共用的关联载荷版本 */
-export const WATCHDOG_MESSAGE_VERSION = 1;
 /** 决策消息（原催促触发行）：display:false，携带 exchangeId 供上下文折叠关联。
  *  字符串值保持 "pi-watchdog:nudge" 不变——已落盘会话里的 customType 依赖它。 */
 export const DECISION_MESSAGE_TYPE = "pi-watchdog:nudge";
@@ -51,7 +49,6 @@ const DECISION_REPLY_MAX_CHARS = 300;
 
 /** 决策卡片的持久化载荷（写入 session 的 CustomEntry，不进 LLM 上下文） */
 export interface DecisionCardData {
-	version: number;
 	exchangeId: string;
 	outcome: "continue" | "stop" | "superseded";
 	/** 决策回合里 AI 的回复文本（已截断）；被拦截工具调用附带的文字也在此 */
@@ -181,7 +178,7 @@ function messageExchangeId(message: unknown): string | undefined {
 	if (!isRecord(message) || message.role !== "custom") return undefined;
 	if (message.customType !== DECISION_MESSAGE_TYPE) return undefined;
 	const details = message.details;
-	if (!isRecord(details) || details.version !== WATCHDOG_MESSAGE_VERSION) return undefined;
+	if (!isRecord(details)) return undefined;
 	const exchangeId = details.exchangeId;
 	return typeof exchangeId === "string" && exchangeId.length > 0 ? exchangeId : undefined;
 }
@@ -189,7 +186,7 @@ function messageExchangeId(message: unknown): string | undefined {
 function sameExchange(message: unknown, customType: string, exchangeId: string): boolean {
 	if (!isRecord(message) || message.role !== "custom" || message.customType !== customType) return false;
 	const details = message.details;
-	if (!isRecord(details) || details.version !== WATCHDOG_MESSAGE_VERSION) return false;
+	if (!isRecord(details)) return false;
 	return details.exchangeId === exchangeId;
 }
 
@@ -579,15 +576,13 @@ export default function (pi: ExtensionAPI) {
 		try {
 			const exchangeId = createExchangeId();
 			decisionWindow = { exchangeId, stopCalled: false };
-			// marker 走 appendEntry（CustomEntry 不进上下文），跨 resume/reload 也能识别这次交换
-			pi.appendEntry("pi-watchdog:nudge-marker", { version: WATCHDOG_MESSAGE_VERSION, exchangeId });
 			// 决策回合：display:false 不污染 TUI 历史；details 里的 exchangeId 让 context 钩子定位这段交换
 			pi.sendMessage(
 				{
 					customType: DECISION_MESSAGE_TYPE,
 					content: DECISION_MESSAGE,
 					display: false,
-					details: { version: WATCHDOG_MESSAGE_VERSION, exchangeId },
+					details: { exchangeId },
 				},
 				{ triggerTurn: true, deliverAs: "steer" },
 			);
@@ -839,7 +834,6 @@ export default function (pi: ExtensionAPI) {
 						content: "",
 						display: false,
 						details: {
-							version: WATCHDOG_MESSAGE_VERSION,
 							exchangeId: window.exchangeId,
 							outcome,
 						},
@@ -854,7 +848,7 @@ export default function (pi: ExtensionAPI) {
 						customType: CONTINUATION_MESSAGE_TYPE,
 						content: continuationText(state.message || undefined),
 						display: true,
-						details: { version: WATCHDOG_MESSAGE_VERSION, exchangeId: window.exchangeId },
+						details: { exchangeId: window.exchangeId },
 					},
 					{ triggerTurn: true, deliverAs: "followUp" },
 				);
@@ -862,7 +856,6 @@ export default function (pi: ExtensionAPI) {
 			// 决策卡片：TUI-only，展示这次检查做了什么（结果 + AI 回复）。写在 sendMessage 之后，
 			// 让卡片在时间线上落在继续消息附近；CustomEntry 不进上下文，折叠语义不受影响。
 			pi.appendEntry<DecisionCardData>(DECISION_ENTRY_TYPE, {
-				version: WATCHDOG_MESSAGE_VERSION,
 				exchangeId: window.exchangeId,
 				outcome,
 				reply: window.replyText,
