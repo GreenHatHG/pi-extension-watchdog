@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { DECISION_ENTRY_TYPE, nudgeText as nudge } from "../index.ts";
+import { DECISION_ENTRY_TYPE, continuationText as nudge } from "../index.ts";
 import { continuationMessages, nudgeMessages, setup } from "./helpers/setup.js";
 
 beforeEach(() => {

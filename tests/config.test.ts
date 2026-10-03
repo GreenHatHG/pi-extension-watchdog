@@ -1,5 +1,5 @@
 import { beforeEach, expect, it, vi } from "vitest";
-import { nudgeText as nudge } from "../index.ts";
+import { continuationText as nudge } from "../index.ts";
 import { setup } from "./helpers/setup.js";
 
 beforeEach(() => {

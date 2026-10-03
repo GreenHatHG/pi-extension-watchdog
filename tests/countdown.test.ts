@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { DEFAULT_MESSAGE, nudgeText as nudge } from "../index.ts";
+import { DEFAULT_MESSAGE, continuationText as nudge } from "../index.ts";
 import { nudgeMessages, setup } from "./helpers/setup.js";
 
 beforeEach(() => {

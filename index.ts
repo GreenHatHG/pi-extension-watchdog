@@ -12,7 +12,7 @@ export const DEFAULT_MESSAGE =
 	"If no work remains and no decision is pending, call stop_watchdog to end the turn.";
 
 /** 组装继续消息（真正触发工作回合）：固定触发行 + 可选追加指令（message=），自定义内容不会替换触发行语义。 */
-export function nudgeText(hint?: string): string {
+export function continuationText(hint?: string): string {
 	return hint ? `${DEFAULT_MESSAGE}\n\nTask instruction: ${hint}` : DEFAULT_MESSAGE;
 }
 
@@ -24,24 +24,22 @@ export function nudgeText(hint?: string): string {
  * 因为决策回合不产生任何需要保留的工作，它的全部内容能作为一个封闭交换被折叠掉，
  * 而后续工作回合追加在其后，prompt cache 前缀保持稳定。
  */
-export function decisionText(): string {
-	return (
-		"[Automated, not user input] Watchdog check — do not use tools in this turn. " +
-		"Reply with a brief acknowledgement if work remains; the watchdog will send the actual continue " +
-		"instruction in the next turn. If no work remains, or you are waiting on a user decision, call " +
-		"stop_watchdog as your final action."
-	);
-}
+export const DECISION_MESSAGE =
+	"[Automated, not user input] Watchdog check — do not use tools in this turn. " +
+	"Reply with a brief acknowledgement if work remains; the watchdog will send the actual continue " +
+	"instruction in the next turn. If no work remains, or you are waiting on a user decision, call " +
+	"stop_watchdog as your final action.";
 
 /** 用户最后一次按键后多久内视为「仍在操作」（上下选择、翻历史等），期间暂停倒计时 */
 const ACTIVITY_GRACE_MS = 2000;
 
 const TOOL_NAME = "stop_watchdog";
 
-/** nudge/continuation/fold 三类可折叠消息共用的关联载荷版本 */
+/** decision/continuation/fold 三类可折叠消息共用的关联载荷版本 */
 export const WATCHDOG_MESSAGE_VERSION = 1;
-/** 决策消息（原催促触发行）：display:false，携带 exchangeId 供上下文折叠关联 */
-export const NUDGE_MESSAGE_TYPE = "pi-watchdog:nudge";
+/** 决策消息（原催促触发行）：display:false，携带 exchangeId 供上下文折叠关联。
+ *  字符串值保持 "pi-watchdog:nudge" 不变——已落盘会话里的 customType 依赖它。 */
+export const DECISION_MESSAGE_TYPE = "pi-watchdog:nudge";
 /** 继续消息：决策结果为 continue 时发出，触发真正的工作回合，兼作折叠区间终止标记 */
 export const CONTINUATION_MESSAGE_TYPE = "pi-watchdog:continuation";
 /** 停止标记：决策结果为 stop 时写入，供折叠删除整个决策交换 */
@@ -181,7 +179,7 @@ function textFromContent(content: unknown): string {
 /** 只把「合法关联的决策消息」当作折叠起点，其它一切 custom 消息都不动 */
 function messageExchangeId(message: unknown): string | undefined {
 	if (!isRecord(message) || message.role !== "custom") return undefined;
-	if (message.customType !== NUDGE_MESSAGE_TYPE) return undefined;
+	if (message.customType !== DECISION_MESSAGE_TYPE) return undefined;
 	const details = message.details;
 	if (!isRecord(details) || details.version !== WATCHDOG_MESSAGE_VERSION) return undefined;
 	const exchangeId = details.exchangeId;
@@ -336,7 +334,7 @@ export default function (pi: ExtensionAPI) {
 		keepAlive: false,
 		suspended: false,
 		timeoutMs: DEFAULT_TIMEOUT_SECONDS * 1000,
-		message: "", // 追加指令（Task instruction）本体；触发行由 nudgeText 固定拼接
+		message: "", // 追加指令（Task instruction）本体；触发行由 continuationText 固定拼接
 		maxNudges: DEFAULT_MAX_NUDGES,
 		nudgeCount: 0,
 		countdownDeadline: null,
@@ -586,8 +584,8 @@ export default function (pi: ExtensionAPI) {
 			// 决策回合：display:false 不污染 TUI 历史；details 里的 exchangeId 让 context 钩子定位这段交换
 			pi.sendMessage(
 				{
-					customType: NUDGE_MESSAGE_TYPE,
-					content: decisionText(),
+					customType: DECISION_MESSAGE_TYPE,
+					content: DECISION_MESSAGE,
 					display: false,
 					details: { version: WATCHDOG_MESSAGE_VERSION, exchangeId },
 				},
@@ -854,7 +852,7 @@ export default function (pi: ExtensionAPI) {
 				pi.sendMessage(
 					{
 						customType: CONTINUATION_MESSAGE_TYPE,
-						content: nudgeText(state.message || undefined),
+						content: continuationText(state.message || undefined),
 						display: true,
 						details: { version: WATCHDOG_MESSAGE_VERSION, exchangeId: window.exchangeId },
 					},

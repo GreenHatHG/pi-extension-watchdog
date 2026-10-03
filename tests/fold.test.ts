@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
 	CONTINUATION_MESSAGE_TYPE,
-	decisionText,
+	DECISION_MESSAGE,
+	DECISION_MESSAGE_TYPE,
 	FOLD_MESSAGE_TYPE,
 	foldWatchdogContext,
-	NUDGE_MESSAGE_TYPE,
-	nudgeText as nudge,
+	continuationText as nudge,
 	WATCHDOG_MESSAGE_VERSION,
 } from "../index.ts";
 import { continuationMessages, nudgeMessages, setup } from "./helpers/setup.js";
@@ -14,8 +14,8 @@ const EXCHANGE = "exchange-1";
 
 const nudgeMsg = (exchangeId = EXCHANGE) => ({
 	role: "custom",
-	customType: NUDGE_MESSAGE_TYPE,
-	content: decisionText(),
+	customType: DECISION_MESSAGE_TYPE,
+	content: DECISION_MESSAGE,
 	display: false,
 	details: { version: WATCHDOG_MESSAGE_VERSION, exchangeId },
 });
@@ -154,7 +154,7 @@ it("context 钩子：决策回合结束后请求视图里不再有决策交换",
 	await rt.settleAfterRun(); // 决策回合结束（模型没调 stop）→ 继续消息
 
 	const folded = (await rt.emitContext(rt.currentMessages())) as any[];
-	expect(folded.some((m) => m.customType === NUDGE_MESSAGE_TYPE)).toBe(false);
+	expect(folded.some((m) => m.customType === DECISION_MESSAGE_TYPE)).toBe(false);
 	expect(folded.filter((m) => m.role === "custom").map((m) => m.customType)).toEqual([CONTINUATION_MESSAGE_TYPE]);
 });
 
@@ -242,7 +242,7 @@ it("决策期间用户插话 → 本次检查作废、不发继续消息，决�
 	expect(continuationMessages(rt)).toHaveLength(0);
 	expect(rt.customMessages.some((m) => m.customType === FOLD_MESSAGE_TYPE)).toBe(true);
 	const folded = (await rt.emitContext(rt.currentMessages())) as any[];
-	expect(folded.some((m) => m.customType === NUDGE_MESSAGE_TYPE)).toBe(false);
+	expect(folded.some((m) => m.customType === DECISION_MESSAGE_TYPE)).toBe(false);
 
 	// watchdog 仍在运行，用户回合结束后会重新倒计时
 	await rt.commands.get("watchdog").handler("status", rt.ctx);
