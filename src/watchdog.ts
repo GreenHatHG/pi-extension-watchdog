@@ -176,7 +176,7 @@ function onToolCall(event: ToolCallEvent): ToolCallEventResult | undefined {
 		block: true,
 		reason:
 			"Watchdog decision turn: tools are blocked. Reply with a brief acknowledgement if work remains; " +
-			"the watchdog will send the continue instruction next. Otherwise call stop_watchdog.",
+			"otherwise call stop_watchdog.",
 	};
 }
 
@@ -355,23 +355,77 @@ function fg(ctx: ExtensionContext, color: "accent" | "dim" | "muted", text: stri
 	return theme?.fg ? theme.fg(color, text) : text;
 }
 
-/** Status bar: counting `⏱23s 2/50`, paused `⏱✍ 2/50`, running `⏱▶ 2/50`, paused run `⏱⏸ 2/50`. */
-function renderStatus(ctx: ExtensionContext) {
-	if (!state.running) return;
-	const count = fg(ctx, "dim", ` ${state.nudgeCount}/${state.maxNudges}`);
-	if (state.suspended) {
-		ctx.ui.setStatus(STATUS_KEY, fg(ctx, "muted", "⏱⏸") + count);
-	} else if (state.interrupted) {
-		// ESC stopped the last run: no nudge this idle spell, so show that.
-		ctx.ui.setStatus(STATUS_KEY, fg(ctx, "muted", "⏱⏹") + count);
-	} else if (state.countdownDeadline != null) {
-		const remaining = Math.max(0, Math.ceil((state.countdownDeadline - Date.now()) / 1000));
-		ctx.ui.setStatus(STATUS_KEY, fg(ctx, "accent", `⏱${remaining}s`) + count);
-	} else if (state.pausedByInput || state.pausedByActivity) {
-		ctx.ui.setStatus(STATUS_KEY, fg(ctx, "muted", "⏱✍") + count);
-	} else {
-		ctx.ui.setStatus(STATUS_KEY, fg(ctx, "muted", "⏱▶") + count);
+/** What the watchdog is doing right now; one value for both the status bar and /watchdog status. */
+type WatchdogPhase =
+	| { kind: "suspended" }
+	| { kind: "interrupted" }
+	| { kind: "counting"; remainingSeconds: number }
+	| { kind: "paused-input" }
+	| { kind: "paused-activity" }
+	| { kind: "idle" };
+
+/**
+ * Current phase. Status bar and /watchdog status both render from this, so the branch order lives
+ * here only; two copies in two different orders is how they drifted apart before.
+ */
+function currentPhase(): WatchdogPhase {
+	if (state.suspended) return { kind: "suspended" };
+	if (state.interrupted) return { kind: "interrupted" };
+	if (state.countdownDeadline != null) {
+		const remainingSeconds = Math.max(0, Math.ceil((state.countdownDeadline - Date.now()) / 1000));
+		return { kind: "counting", remainingSeconds };
 	}
+	if (state.pausedByInput) return { kind: "paused-input" };
+	if (state.pausedByActivity) return { kind: "paused-activity" };
+	return { kind: "idle" };
+}
+
+/** /watchdog status wording per phase; tests match these strings, so keep them stable. */
+function phaseText(phase: WatchdogPhase): string {
+	switch (phase.kind) {
+		case "counting":
+			return `nudge in ${phase.remainingSeconds}s`;
+		case "paused-input":
+			return "paused: you're typing (resumes when the box is empty)";
+		case "paused-activity":
+			return "paused: you're pressing keys (resumes when you stop)";
+		case "interrupted":
+			return "ESC-interrupted (no nudge this idle spell, resumes after your next message)";
+		case "suspended":
+			// /watchdog status reports a nap with its own wording before reaching here.
+			return "keep-mode monitoring paused (next message resumes it)";
+		case "idle":
+			return "waiting for the AI to go idle";
+	}
+}
+
+/** Status bar: counting `⏱23s 2/50`, paused `⏱✍ 2/50`, waiting `⏱▶ 2/50`, napping `⏱⏸ 2/50`, stopped `⏱⏹ 2/50`. */
+function renderStatus(ctx: ExtensionContext) {
+	// A nap has running=false but still owns the status line, so don't bail out on it.
+	if (!state.running && !state.suspended) return;
+	const count = fg(ctx, "dim", ` ${state.nudgeCount}/${state.maxNudges}`);
+	const phase = currentPhase();
+	let glyph: string;
+	switch (phase.kind) {
+		case "suspended":
+			glyph = fg(ctx, "muted", "⏱⏸");
+			break;
+		case "interrupted":
+			// ESC stopped the last run: no nudge this idle spell, so show that.
+			glyph = fg(ctx, "muted", "⏱⏹");
+			break;
+		case "counting":
+			glyph = fg(ctx, "accent", `⏱${phase.remainingSeconds}s`);
+			break;
+		case "paused-input":
+		case "paused-activity":
+			glyph = fg(ctx, "muted", "⏱✍");
+			break;
+		case "idle":
+			glyph = fg(ctx, "muted", "⏱▶");
+			break;
+	}
+	ctx.ui.setStatus(STATUS_KEY, glyph + count);
 }
 
 // ---------- lifecycle ----------
@@ -734,19 +788,10 @@ function registerWatchdogCommand() {
 						);
 						break;
 					}
-					const countdown =
-						state.countdownDeadline != null
-							? `nudge in ${Math.max(0, Math.ceil((state.countdownDeadline - Date.now()) / 1000))}s`
-							: state.pausedByInput
-								? "paused: you're typing (resumes when the box is empty)"
-								: state.pausedByActivity
-									? "paused: you're pressing keys (resumes when you stop)"
-									: state.interrupted
-										? "ESC-interrupted (no nudge this idle spell, resumes after your next message)"
-										: "waiting for the AI to go idle";
+					const phase = currentPhase();
 					const msgPreview = state.message.length > 30 ? `${state.message.slice(0, 30)}…` : state.message;
 					ctx.ui.notify(
-						`watchdog: running · ${countdown} · nudged ${state.nudgeCount}/${state.maxNudges} · extra order: "${msgPreview || "-"}"`,
+						`watchdog: running · ${phaseText(phase)} · nudged ${state.nudgeCount}/${state.maxNudges} · extra order: "${msgPreview || "-"}"`,
 						"info",
 					);
 					break;

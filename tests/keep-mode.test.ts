@@ -32,6 +32,22 @@ it("keep mode: timeout nudges → stop_watchdog only pauses → an interactive m
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });
 
+it("keep mode: a nap keeps the status line and shows ⏱⏸ instead of the last waiting glyph", async () => {
+	const rt = await setup();
+	await rt.commands.get("watchdog").handler("timeout=1 mode=keep message=keep nap", rt.ctx);
+	await rt.settleAfterRun(); // idle → counting, so the bar reads ⏱1s
+	expect(rt.statusBars.get("watchdog")).toContain("⏱1s");
+
+	// the AI calls stop_watchdog while idle → soft stop = nap, not a full stop
+	await rt.tools.get("stop_watchdog").execute("t12", {}, undefined, undefined, rt.ctx);
+	expect(rt.statusBars.get("watchdog")).toContain("⏱⏸");
+
+	// the user comes back: the nap ends and the bar counts down again
+	await rt.emit("input", { text: "new task", source: "interactive" });
+	expect(rt.statusBars.get("watchdog")).toContain("⏱1s");
+	await rt.commands.get("watchdog").handler("stop", rt.ctx);
+});
+
 it("keep mode: an input from an extension does not resume", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1 mode=keep message=keep test2", rt.ctx);

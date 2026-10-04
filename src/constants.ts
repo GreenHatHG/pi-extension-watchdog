@@ -16,9 +16,8 @@ export function continuationText(hint?: string): string {
  */
 export const DECISION_MESSAGE =
 	"[Automated, not user input] Watchdog check — do not use tools in this turn. " +
-	"Reply with a brief acknowledgement if work remains; the watchdog will send the actual continue " +
-	"instruction in the next turn. If no work remains, or you are waiting on a user decision, call " +
-	"stop_watchdog as your final action.";
+	"Reply with a brief acknowledgement if work remains. If no work remains, or you are waiting on a " +
+	"user decision, call stop_watchdog as your final action.";
 
 /** How long after the last key press we still treat the user as busy, so we hold the countdown. */
 export const ACTIVITY_GRACE_MS = 2000;
