@@ -1,5 +1,5 @@
 import { beforeEach, expect, it, vi } from "vitest";
-import { continuationText as nudge } from "../index.ts";
+import { continuationText as nudge } from "../src/constants.ts";
 import { setup } from "./helpers/setup.js";
 
 beforeEach(() => {
@@ -7,56 +7,58 @@ beforeEach(() => {
 	vi.resetModules();
 });
 
-it("加载时不注册工具，首次启动监控后才注册且默认激活", async () => {
+it("no tool on load; the first start registers it and marks it active", async () => {
 	const rt = await setup();
-	expect(rt.tools.has("stop_watchdog")).toBe(false); // 懒注册：未启用监控的会话不占 tools 名额
+	expect(rt.tools.has("stop_watchdog")).toBe(false); // lazy: sessions without monitoring save the tool slot
 	expect(rt.commands.has("watchdog")).toBe(true);
 	await rt.commands.get("watchdog").handler("timeout=60", rt.ctx);
 	expect(rt.tools.has("stop_watchdog")).toBe(true);
 	expect(rt.activeTools.has("stop_watchdog")).toBe(true);
 });
 
-it("key=value 严格解析：裸 token / 未知 key / 非法值 / 非法 mode 都被拒绝并提示用法", async () => {
+it("strict key=value: bare token / unknown key / bad value / bad mode are all rejected with usage", async () => {
 	const rt = await setup();
-	for (const bad of ["30 继续吧", "foo=bar", "timeout=abc", "mode=always"]) {
+	for (const bad of ["30 go on", "foo=bar", "timeout=abc", "mode=always"]) {
 		await rt.commands.get("watchdog").handler(bad, rt.ctx);
 	}
-	const warns = rt.notifications.filter((n) => n.msg.includes("参数无效"));
+	const warns = rt.notifications.filter((n) => n.msg.includes("bad args"));
 	expect(warns).toHaveLength(4);
-	expect(warns[0].msg).toContain("用法");
+	expect(warns[0].msg).toContain("Usage");
 
-	// 拒绝后监控未启动
+	// rejected, so monitoring stayed off
 	rt.notifications.length = 0;
 	await rt.commands.get("watchdog").handler("status", rt.ctx);
-	expect(rt.notifications.some((n) => n.msg.includes("未在运行"))).toBe(true);
+	expect(rt.notifications.some((n) => n.msg.includes("not running"))).toBe(true);
 });
 
-it("合法参数组合 timeout/max/message 解析生效并按配置催促", async () => {
+it("a valid timeout/max/message combo takes effect and nudges as set", async () => {
 	const rt = await setup();
-	await rt.commands.get("watchdog").handler("timeout=1 max=2 message=解析测试", rt.ctx);
+	await rt.commands.get("watchdog").handler("timeout=1 max=2 message=parse test", rt.ctx);
 	await rt.settleAfterRun();
-	await vi.advanceTimersByTimeAsync(1100); // 决策回合
-	await rt.settleAfterRun(); // 决策回合结束 → 继续消息
-	expect(rt.sentMessages.at(-1)).toBe(nudge("解析测试"));
+	await vi.advanceTimersByTimeAsync(1100); // decision turn
+	await rt.settleAfterRun(); // decision turn ends → continue message
+	expect(rt.sentMessages.at(-1)).toBe(nudge("parse test"));
 	await rt.settleAfterRun();
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
-	expect(rt.notifications.some((n) => n.msg.includes("监控已停止"))).toBe(true);
+	expect(rt.notifications.some((n) => n.msg.includes("monitoring stopped"))).toBe(true);
 });
 
-it("message= 含空格的多 token 文案拼接", async () => {
+it("message= with spaces joins all the tokens into one text", async () => {
 	const rt = await setup();
-	await rt.commands.get("watchdog").handler("timeout=1 message=继续 下一步", rt.ctx);
+	await rt.commands.get("watchdog").handler("timeout=1 message=continue next step", rt.ctx);
 	await rt.settleAfterRun();
-	await vi.advanceTimersByTimeAsync(1100); // 决策回合
-	await rt.settleAfterRun(); // 决策回合结束 → 继续消息
-	expect(rt.sentMessages.at(-1)).toBe(nudge("继续 下一步"));
+	await vi.advanceTimersByTimeAsync(1100); // decision turn
+	await rt.settleAfterRun(); // decision turn ends → continue message
+	expect(rt.sentMessages.at(-1)).toBe(nudge("continue next step"));
 	await rt.settleAfterRun();
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });
 
-it("无参数 = 默认参数（60s）启动", async () => {
+it("no args = default settings (60s)", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("", rt.ctx);
-	expect(rt.notifications.some((n) => n.msg.includes("监控已启动") && n.msg.includes("空闲 60s"))).toBe(true);
+	expect(rt.notifications.some((n) => n.msg.includes("monitoring started") && n.msg.includes("after 60s idle"))).toBe(
+		true,
+	);
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });

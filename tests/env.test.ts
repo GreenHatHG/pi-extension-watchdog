@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { continuationText as nudge } from "../index.ts";
+import { continuationText as nudge } from "../src/constants.ts";
 import { nudgeMessages, setup } from "./helpers/setup.js";
 
 beforeEach(() => {
@@ -10,47 +10,47 @@ afterEach(() => {
 	vi.useRealTimers();
 });
 
-it("PI_WATCHDOG 合法配置：session_start 自动启动，超时后用自定义文案催促", async () => {
-	process.env.PI_WATCHDOG = "timeout=1 message=环境变量文案";
+it("valid PI_WATCHDOG: session_start auto-starts, nudges with the custom text after the timeout", async () => {
+	process.env.PI_WATCHDOG = "timeout=1 message=env text";
 	const rt = await setup();
 	await rt.emit("session_start", { reason: "startup" });
-	expect(rt.notifications.some((n) => n.msg.includes("监控已启动"))).toBe(true);
+	expect(rt.notifications.some((n) => n.msg.includes("monitoring started"))).toBe(true);
 
-	await vi.advanceTimersByTimeAsync(1300); // 决策回合
+	await vi.advanceTimersByTimeAsync(1300); // decision turn
 	expect(nudgeMessages(rt)).toHaveLength(1);
-	await rt.settleAfterRun(); // 决策回合结束 → 继续消息
-	expect(rt.sentMessages.at(-1)).toBe(nudge("环境变量文案"));
+	await rt.settleAfterRun(); // decision turn ends → continue message
+	expect(rt.sentMessages.at(-1)).toBe(nudge("env text"));
 
 	await rt.settleAfterRun();
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });
 
-it("/resume 恢复会话：监控已启动但不立即倒计时，首次 agent_settled 后才催促", async () => {
-	process.env.PI_WATCHDOG = "timeout=1 message=环境变量文案";
+it("/resume: monitoring starts but does not count down right away, first agent_settled then nudges", async () => {
+	process.env.PI_WATCHDOG = "timeout=1 message=env text";
 	const rt = await setup();
 	await rt.emit("session_start", { reason: "resume" });
-	expect(rt.notifications.some((n) => n.msg.includes("监控已启动"))).toBe(true);
-	expect(rt.notifications.some((n) => n.msg.includes("恢复的会话"))).toBe(true);
+	expect(rt.notifications.some((n) => n.msg.includes("monitoring started"))).toBe(true);
+	expect(rt.notifications.some((n) => n.msg.includes("restored session"))).toBe(true);
 
-	// 用户恢复后没有别的操作：不倒计时、不催促
+	// the user does nothing after resuming: no countdown, no nudge
 	await vi.advanceTimersByTimeAsync(5000);
 	expect(rt.sentMessages).toHaveLength(0);
 
-	// 实际操作（AI 跑完一轮）后开始正常倒计时
+	// after real work (one finished AI run) the normal countdown starts
 	await rt.settleAfterRun();
-	await vi.advanceTimersByTimeAsync(1300); // 决策回合
-	await rt.settleAfterRun(); // 决策回合结束 → 继续消息
-	expect(rt.sentMessages.at(-1)).toBe(nudge("环境变量文案"));
+	await vi.advanceTimersByTimeAsync(1300); // decision turn
+	await rt.settleAfterRun(); // decision turn ends → continue message
+	expect(rt.sentMessages.at(-1)).toBe(nudge("env text"));
 
 	await rt.settleAfterRun();
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });
 
-it("/fork 恢复旧树点：同样不立即倒计时", async () => {
+it("/fork: also does not count down right away", async () => {
 	process.env.PI_WATCHDOG = "timeout=1";
 	const rt = await setup();
 	await rt.emit("session_start", { reason: "fork" });
-	expect(rt.notifications.some((n) => n.msg.includes("恢复的会话"))).toBe(true);
+	expect(rt.notifications.some((n) => n.msg.includes("restored session"))).toBe(true);
 
 	await vi.advanceTimersByTimeAsync(3000);
 	expect(rt.sentMessages).toHaveLength(0);
@@ -59,26 +59,28 @@ it("/fork 恢复旧树点：同样不立即倒计时", async () => {
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });
 
-it("PI_WATCHDOG=0 时不自动启动（也不注册工具，不占 token）", async () => {
+it("PI_WATCHDOG=0 does not auto-start (and does not register the tool, saving tokens)", async () => {
 	process.env.PI_WATCHDOG = "0";
 	const rt = await setup();
 	await rt.emit("session_start", { reason: "startup" });
 	expect(rt.notifications).toHaveLength(0);
-	expect(rt.activeTools.has("stop_watchdog")).toBe(false); // 懒注册：监控未启动则工具不注册
+	expect(rt.activeTools.has("stop_watchdog")).toBe(false); // lazy: no start, no tool
 });
 
-it("PI_WATCHDOG 非法格式：明确提示，不静默，不启动", async () => {
-	process.env.PI_WATCHDOG = "30:100|旧DSL";
+it("bad PI_WATCHDOG format: clear warning, no silent skip, no start", async () => {
+	process.env.PI_WATCHDOG = "30:100|oldDSL";
 	const rt = await setup();
 	await rt.emit("session_start", { reason: "startup" });
-	expect(rt.notifications.some((n) => n.msg.includes("PI_WATCHDOG 格式无效"))).toBe(true);
-	expect(rt.activeTools.has("stop_watchdog")).toBe(false); // 懒注册：未启动不注册
+	expect(rt.notifications.some((n) => n.msg.includes("bad PI_WATCHDOG"))).toBe(true);
+	expect(rt.activeTools.has("stop_watchdog")).toBe(false); // lazy: no start, no tool
 });
 
-it("PI_WATCHDOG=1 使用默认参数（60s）", async () => {
+it("PI_WATCHDOG=1 uses the default settings (60s)", async () => {
 	process.env.PI_WATCHDOG = "1";
 	const rt = await setup();
 	await rt.emit("session_start", { reason: "startup" });
-	expect(rt.notifications.some((n) => n.msg.includes("监控已启动") && n.msg.includes("空闲 60s"))).toBe(true);
+	expect(rt.notifications.some((n) => n.msg.includes("monitoring started") && n.msg.includes("after 60s idle"))).toBe(
+		true,
+	);
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });

@@ -9,105 +9,105 @@ afterEach(() => {
 	vi.useRealTimers();
 });
 
-it("keep 模式：超时催促 → AI 调 stop_watchdog 仅挂起 → interactive 新消息自动恢复", async () => {
+it("keep mode: timeout nudges → stop_watchdog only pauses → an interactive message resumes", async () => {
 	const rt = await setup();
-	await rt.commands.get("watchdog").handler("timeout=1 mode=keep message=常驻测试", rt.ctx);
-	await vi.advanceTimersByTimeAsync(1100); // 决策回合
+	await rt.commands.get("watchdog").handler("timeout=1 mode=keep message=keep test", rt.ctx);
+	await vi.advanceTimersByTimeAsync(1100); // decision turn
 	expect(nudgeMessages(rt)).toHaveLength(1);
 
-	// 决策回合内 AI 调用 stop_watchdog → 挂起而非关闭
+	// the AI calls stop_watchdog during the decision turn: pause, not off
 	const r = await rt.tools.get("stop_watchdog").execute("t10", {}, undefined, undefined, rt.ctx);
 	expect(JSON.stringify(r.content)).toContain("OK.");
 	expect(rt.activeTools.has("stop_watchdog")).toBe(true);
 
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1300);
-	expect(nudgeMessages(rt)).toHaveLength(1); // 挂起期间不催促
+	expect(nudgeMessages(rt)).toHaveLength(1); // no nudge while paused
 
-	// 用户发新消息 → 自动恢复
-	await rt.emit("input", { text: "新任务", source: "interactive" });
-	expect(rt.notifications.some((n) => n.msg.includes("已恢复"))).toBe(true);
+	// the user sends a new message: auto-resume
+	await rt.emit("input", { text: "new task", source: "interactive" });
+	expect(rt.notifications.some((n) => n.msg.includes("resumed"))).toBe(true);
 	await vi.advanceTimersByTimeAsync(1200);
 	expect(nudgeMessages(rt)).toHaveLength(2);
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });
 
-it("keep 模式：extension 来源的 input 不触发恢复", async () => {
+it("keep mode: an input from an extension does not resume", async () => {
 	const rt = await setup();
-	await rt.commands.get("watchdog").handler("timeout=1 mode=keep message=常驻测试2", rt.ctx);
+	await rt.commands.get("watchdog").handler("timeout=1 mode=keep message=keep test2", rt.ctx);
 	await vi.advanceTimersByTimeAsync(1100);
-	await rt.tools.get("stop_watchdog").execute("t10b", {}, undefined, undefined, rt.ctx); // 挂起
+	await rt.tools.get("stop_watchdog").execute("t10b", {}, undefined, undefined, rt.ctx); // pause
 	await rt.settleAfterRun();
 
-	await rt.emit("input", { text: "催促消息", source: "extension" });
+	await rt.emit("input", { text: "nudge message", source: "extension" });
 	await rt.commands.get("watchdog").handler("status", rt.ctx);
-	expect(rt.notifications.some((n) => n.msg.includes("挂起中"))).toBe(true);
+	expect(rt.notifications.some((n) => n.msg.includes("paused"))).toBe(true);
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });
 
-it("keep 模式：运行中手动 stop 也彻底停止，新消息不唤醒", async () => {
+it("keep mode: a manual stop while running also fully stops, and a new message does not wake it", async () => {
 	const rt = await setup();
-	await rt.commands.get("watchdog").handler("timeout=1 mode=keep message=常驻测试3", rt.ctx);
+	await rt.commands.get("watchdog").handler("timeout=1 mode=keep message=keep test3", rt.ctx);
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
-	expect(rt.notifications.some((n) => n.msg.includes("监控已停止"))).toBe(true);
-	expect(rt.activeTools.has("stop_watchdog")).toBe(true); // 常驻注册：工具始终保留，不再随启停移出
+	expect(rt.notifications.some((n) => n.msg.includes("monitoring stopped"))).toBe(true);
+	expect(rt.activeTools.has("stop_watchdog")).toBe(true); // registered for good, no longer removed on start/stop
 
-	await rt.emit("input", { text: "普通消息", source: "interactive" });
+	await rt.emit("input", { text: "plain message", source: "interactive" });
 	await rt.commands.get("watchdog").handler("status", rt.ctx);
-	expect(rt.notifications.some((n) => n.msg.includes("未在运行"))).toBe(true);
+	expect(rt.notifications.some((n) => n.msg.includes("not running"))).toBe(true);
 });
 
-it("keep 模式：挂起中手动 stop → 彻底关闭", async () => {
+it("keep mode: a manual stop while paused → fully off", async () => {
 	const rt = await setup();
-	await rt.commands.get("watchdog").handler("timeout=1 mode=keep message=常驻测试4", rt.ctx);
+	await rt.commands.get("watchdog").handler("timeout=1 mode=keep message=keep test4", rt.ctx);
 	await vi.advanceTimersByTimeAsync(1100);
-	await rt.tools.get("stop_watchdog").execute("t10c", {}, undefined, undefined, rt.ctx); // 挂起
+	await rt.tools.get("stop_watchdog").execute("t10c", {}, undefined, undefined, rt.ctx); // pause
 	await rt.commands.get("watchdog").handler("status", rt.ctx);
-	expect(rt.notifications.some((n) => n.msg.includes("挂起中"))).toBe(true);
+	expect(rt.notifications.some((n) => n.msg.includes("paused"))).toBe(true);
 
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
-	expect(rt.notifications.some((n) => n.msg.includes("已彻底关闭"))).toBe(true);
+	expect(rt.notifications.some((n) => n.msg.includes("fully off"))).toBe(true);
 	await rt.commands.get("watchdog").handler("status", rt.ctx);
-	expect(rt.notifications.some((n) => n.msg.includes("未在运行"))).toBe(true);
+	expect(rt.notifications.some((n) => n.msg.includes("not running"))).toBe(true);
 });
 
-it("keep 模式：达到 max 上限 → 彻底关闭，新消息不恢复", async () => {
+it("keep mode: hitting the max cap → fully off, a new message does not resume", async () => {
 	const rt = await setup();
-	await rt.commands.get("watchdog").handler("timeout=1 max=1 mode=keep message=常驻上限", rt.ctx);
+	await rt.commands.get("watchdog").handler("timeout=1 max=1 mode=keep message=keep cap", rt.ctx);
 	await rt.settleAfterRun();
-	await vi.advanceTimersByTimeAsync(1100); // 决策回合 1
+	await vi.advanceTimersByTimeAsync(1100); // decision turn 1
 	expect(nudgeMessages(rt)).toHaveLength(1);
-	await rt.settleAfterRun(); // 决策回合结束 → 继续消息
-	await rt.settleAfterRun(); // 工作回合结束 → 倒计时
+	await rt.settleAfterRun(); // decision turn ends → continue message
+	await rt.settleAfterRun(); // work turn ends → countdown
 
-	await vi.advanceTimersByTimeAsync(1100); // 第 2 次被拦截，常驻也彻底关闭
+	await vi.advanceTimersByTimeAsync(1100); // the 2nd is blocked, keep mode also fully off
 	expect(nudgeMessages(rt)).toHaveLength(1);
-	expect(rt.notifications.some((n) => n.msg.includes("已自动停止"))).toBe(true);
-	expect(rt.activeTools.has("stop_watchdog")).toBe(true); // 常驻注册：工具始终保留，不再随启停移出
+	expect(rt.notifications.some((n) => n.msg.includes("auto-stopped"))).toBe(true);
+	expect(rt.activeTools.has("stop_watchdog")).toBe(true); // registered for good, no longer removed on start/stop
 
-	await rt.emit("input", { text: "新任务", source: "interactive" }); // 不再恢复
+	await rt.emit("input", { text: "new task", source: "interactive" }); // no resume
 	await rt.commands.get("watchdog").handler("status", rt.ctx);
-	expect(rt.notifications.some((n) => n.msg.includes("未在运行"))).toBe(true);
+	expect(rt.notifications.some((n) => n.msg.includes("not running"))).toBe(true);
 });
 
-it("PI_WATCHDOG mode=keep：自动以常驻模式启动，挂起后新消息恢复", async () => {
-	process.env.PI_WATCHDOG = "timeout=1 mode=keep message=常驻env文案";
+it("PI_WATCHDOG mode=keep: auto-starts in keep mode, a new message resumes after a pause", async () => {
+	process.env.PI_WATCHDOG = "timeout=1 mode=keep message=keep env text";
 	const rt = await setup();
 	await rt.emit("session_start", { reason: "startup" });
-	expect(rt.notifications.some((n) => n.msg.includes("常驻模式") && n.msg.includes("监控已启动"))).toBe(true);
+	expect(rt.notifications.some((n) => n.msg.includes("keep mode") && n.msg.includes("monitoring started"))).toBe(true);
 
-	await vi.advanceTimersByTimeAsync(1300); // 决策回合
+	await vi.advanceTimersByTimeAsync(1300); // decision turn
 	expect(nudgeMessages(rt)).toHaveLength(1);
 
-	const r = await rt.tools.get("stop_watchdog").execute("t11", {}, undefined, undefined, rt.ctx); // 决策窗口内 → 挂起
+	const r = await rt.tools.get("stop_watchdog").execute("t11", {}, undefined, undefined, rt.ctx); // inside the decision window → pause
 	expect(JSON.stringify(r.content)).toContain("OK.");
 
-	await rt.emit("input", { text: "继续新任务", source: "interactive" });
-	expect(rt.notifications.some((n) => n.msg.includes("已恢复"))).toBe(true);
-	await rt.settleAfterRun(); // 结算被挂起打断的决策回合
-	await vi.advanceTimersByTimeAsync(2300); // ticker 恢复倒计时（≤1s）+ 超时 1s
+	await rt.emit("input", { text: "continue new task", source: "interactive" });
+	expect(rt.notifications.some((n) => n.msg.includes("resumed"))).toBe(true);
+	await rt.settleAfterRun(); // settle the decision turn that the pause interrupted
+	await vi.advanceTimersByTimeAsync(2300); // ticker restarts the countdown (≤1s) + 1s timeout
 	expect(nudgeMessages(rt).length).toBeGreaterThanOrEqual(2);
 
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
-	expect(rt.activeTools.has("stop_watchdog")).toBe(true); // 常驻注册：工具始终保留，不再随启停移出
+	expect(rt.activeTools.has("stop_watchdog")).toBe(true); // registered for good, no longer removed on start/stop
 });

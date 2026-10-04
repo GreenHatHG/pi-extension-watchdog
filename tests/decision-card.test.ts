@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { DECISION_ENTRY_TYPE, type DecisionCardData } from "../index.ts";
+import { DECISION_ENTRY_TYPE } from "../src/constants.ts";
+import type { DecisionCardData } from "../src/decision-card.ts";
 import { setup } from "./helpers/setup.js";
 
 beforeEach(() => {
@@ -10,25 +11,25 @@ afterEach(() => {
 	vi.useRealTimers();
 });
 
-/** 已落盘的决策卡片（appendEntry 的 CustomEntry） */
+/** Decision cards saved so far (the CustomEntry rows from appendEntry). */
 const cards = (rt: { entries: { customType: string; data: any }[] }) =>
 	rt.entries.filter((e) => e.customType === DECISION_ENTRY_TYPE).map((e) => e.data as DecisionCardData);
 
-/** 主题在测试里退化为恒等函数 */
+/** In tests the theme degrades to the identity function. */
 const theme = {
 	fg: (_color: string, text: string) => text,
 	bg: (_color: string, text: string) => text,
 	bold: (text: string) => text,
 };
 
-it("决策结果为继续时落一张卡片，带上 AI 回复", async () => {
+it("outcome continue drops one card with the AI reply", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx);
 	await rt.settleAfterRun();
-	await vi.advanceTimersByTimeAsync(1100); // 决策回合
+	await vi.advanceTimersByTimeAsync(1100); // decision turn
 
 	await rt.emitMessageEnd({ role: "assistant", content: [{ type: "text", text: "still working on it" }] });
-	await rt.settleAfterRun(); // 结算 → 继续
+	await rt.settleAfterRun(); // settle → continue
 
 	const found = cards(rt);
 	expect(found).toHaveLength(1);
@@ -40,11 +41,11 @@ it("决策结果为继续时落一张卡片，带上 AI 回复", async () => {
 	});
 });
 
-it("AI 调 stop_watchdog 时卡片记为主动停止，并保留附带文字", async () => {
+it("when the AI calls stop_watchdog the card says stopped on purpose and keeps the extra text", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx);
 	await rt.settleAfterRun();
-	await vi.advanceTimersByTimeAsync(1100); // 决策回合
+	await vi.advanceTimersByTimeAsync(1100); // decision turn
 
 	await rt.tools.get("stop_watchdog").execute("t1", {}, undefined, undefined, rt.ctx);
 	await rt.emitMessageEnd({
@@ -54,20 +55,20 @@ it("AI 调 stop_watchdog 时卡片记为主动停止，并保留附带文字", a
 			{ type: "toolCall", id: "cs", name: "stop_watchdog", arguments: {} },
 		],
 	});
-	await rt.settleAfterRun(); // 结算 → 停止
+	await rt.settleAfterRun(); // settle → stop
 
 	const found = cards(rt);
 	expect(found).toHaveLength(1);
 	expect(found[0]).toMatchObject({ outcome: "stop", reply: "all done" });
 });
 
-it("用户插话作废时卡片记为 superseded，而非 stop", async () => {
+it("when the user takes over the card says superseded, not stop", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx);
 	await rt.settleAfterRun();
-	await vi.advanceTimersByTimeAsync(1100); // 决策回合
+	await vi.advanceTimersByTimeAsync(1100); // decision turn
 
-	rt.state.pendingMessages = 1; // 用户排队了一条消息
+	rt.state.pendingMessages = 1; // the user queued one message
 	await rt.settleAfterRun();
 
 	const found = cards(rt);
@@ -75,13 +76,13 @@ it("用户插话作废时卡片记为 superseded，而非 stop", async () => {
 	expect(found[0].outcome).toBe("superseded");
 });
 
-it("过长的 AI 回复在落盘前被截断到上限", async () => {
+it("a very long AI reply is cut to the cap before saving", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx);
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1100);
 
-	const long = "字".repeat(400);
+	const long = "x".repeat(400);
 	await rt.emitMessageEnd({ role: "assistant", content: [{ type: "text", text: long }] });
 	await rt.settleAfterRun();
 
@@ -90,7 +91,7 @@ it("过长的 AI 回复在落盘前被截断到上限", async () => {
 	expect(found[0].reply).toBe(long.slice(0, 300));
 });
 
-it("决策卡片渲染器：折叠时只给灰字提示，展开后给回复全文", async () => {
+it("decision card renderer: a grey hint when folded, the full reply when expanded", async () => {
 	const rt = await setup();
 	const renderer = rt.entryRenderers.get(DECISION_ENTRY_TYPE);
 	expect(renderer).toBeTypeOf("function");
@@ -105,16 +106,16 @@ it("决策卡片渲染器：折叠时只给灰字提示，展开后给回复全�
 	};
 	const entry = { customType: DECISION_ENTRY_TYPE, data };
 	const collapsed = renderer!(entry, { expanded: false }, theme).render(80).join("\n");
-	expect(collapsed).toContain("还有活 → 继续");
+	expect(collapsed).toContain("Work left → continue");
 	expect(collapsed).toContain("2/50");
-	expect(collapsed).toContain("决策回复已折叠");
+	expect(collapsed).toContain("reply folded");
 	expect(collapsed).not.toContain("still working on it");
 
 	const expanded = renderer!(entry, { expanded: true }, theme).render(80).join("\n");
 	expect(expanded).toContain("still working on it");
 });
 
-it("决策卡片在 fullscreen 下可点击展开、再点击收起", async () => {
+it("in fullscreen the card expands on click and collapses on a second click", async () => {
 	const rt = await setup();
 	const renderer = rt.entryRenderers.get(DECISION_ENTRY_TYPE);
 	const data: DecisionCardData = {
@@ -140,14 +141,14 @@ it("决策卡片在 fullscreen 下可点击展开、再点击收起", async () =
 		ctrl: false,
 	};
 
-	expect(view.render(80).join("\n")).toContain("决策回复已折叠");
+	expect(view.render(80).join("\n")).toContain("reply folded");
 	view.handleMouse(clickLeft);
 	expect(view.render(80).join("\n")).toContain("still working on it");
 	view.handleMouse(clickLeft);
-	expect(view.render(80).join("\n")).toContain("决策回复已折叠");
+	expect(view.render(80).join("\n")).toContain("reply folded");
 });
 
-it("keep 模式下的 stop 卡片记录挂起态，并渲染「常驻监控挂起」文案", async () => {
+it("a keep-mode stop card records the paused state and renders the keep-mode paused text", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1 mode=keep", rt.ctx);
 	await rt.settleAfterRun();
@@ -162,10 +163,10 @@ it("keep 模式下的 stop 卡片记录挂起态，并渲染「常驻监控挂�
 	const line = renderer!({ customType: DECISION_ENTRY_TYPE, data: found[0] }, { expanded: false }, theme)
 		.render(120)
 		.join("\n");
-	expect(line).toContain("常驻监控挂起");
+	expect(line).toContain("keep mode paused");
 });
 
-it("once 模式下的 stop 卡片不带挂起态", async () => {
+it("a once-mode stop card has no paused state", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx);
 	await rt.settleAfterRun();
@@ -176,13 +177,13 @@ it("once 模式下的 stop 卡片不带挂起态", async () => {
 	expect(cards(rt)[0]).toMatchObject({ outcome: "stop", suspended: false });
 });
 
-it("stop 后 abort 产生的幻影 error 消息在决策窗口被清成空消息", async () => {
+it("the stopReason error message left by stop_watchdog's abort is cleared inside the decision window", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx);
 	await rt.settleAfterRun();
-	await vi.advanceTimersByTimeAsync(1100); // 决策窗口开启
+	await vi.advanceTimersByTimeAsync(1100); // decision window opens
 
-	// 决策窗口里真实的错误不能被吞掉（未调用 stop_watchdog 时原样保留）
+	// a real error in the decision window must not be swallowed: it stays when stop_watchdog was not called
 	const real = await rt.emitMessageEnd({
 		role: "assistant",
 		content: [],
@@ -204,13 +205,13 @@ it("stop 后 abort 产生的幻影 error 消息在决策窗口被清成空消息
 	expect(phantom.message.errorMessage).toBeUndefined();
 });
 
-it("用户 ESC（stopReason aborted）不被 rewrite，保住 runWasAborted 检测", async () => {
+it("a user ESC (stopReason aborted) is not rewritten, so runWasAborted still works", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx);
 	await rt.settleAfterRun();
-	await vi.advanceTimersByTimeAsync(1100); // 决策窗口开启
+	await vi.advanceTimersByTimeAsync(1100); // decision window opens
 
-	// 用户插话后自己按 ESC：不能在 stopCalled 分支里被误碰
+	// after a user interjection they press ESC themselves: the stopCalled branch must not touch this
 	await rt.tools.get("stop_watchdog").execute("t1", {}, undefined, undefined, rt.ctx);
 	const escaped = await rt.emitMessageEnd({
 		role: "assistant",
@@ -222,9 +223,9 @@ it("用户 ESC（stopReason aborted）不被 rewrite，保住 runWasAborted 检�
 	expect(escaped.message.errorMessage).toBe("Operation aborted");
 });
 
-it("stop_watchdog 的工具行渲染为空（renderShell:self + 空 renderCall/renderResult）", async () => {
+it("stop_watchdog's tool lines render empty (renderShell:self plus empty renderCall/renderResult)", async () => {
 	const rt = await setup();
-	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx); // 懒注册工具
+	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx); // lazy tool registration
 	const tool = rt.tools.get("stop_watchdog");
 	expect(tool.renderShell).toBe("self");
 	const ctxArg = { args: {}, toolCallId: "t1", state: {}, expanded: false, isPartial: false };

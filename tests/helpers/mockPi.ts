@@ -1,7 +1,6 @@
 /**
- * 共享的 pi 运行时 mock：模拟 extension 注册、工具/命令、active tools、
- * 空闲状态、终端按键广播、custom message 落盘与 context 折叠钩子。
- * 每个测试创建独立实例，互不污染。
+ * Shared pi runtime mock: fakes extension registration, tools and commands, run idle state, raw key broadcasts,
+ * custom message saving, and the context fold hook. Every test gets its own instance, so nothing leaks.
  */
 export type Handler = (event: any, ctx: any) => Promise<any>;
 
@@ -10,19 +9,19 @@ export function createMockRuntime() {
 	const eventBusHandlers = new Map<string, Set<(data: unknown) => void>>();
 	const tools = new Map<string, any>();
 	const commands = new Map<string, any>();
-	// 模拟 pi 的 active tools：registerTool 注册的工具默认进入 active 集合
+	// Like real pi: a registered tool joins the active set by default.
 	const activeTools = new Set<string>(["read", "bash", "edit", "write"]);
-	// sendUserMessage / sendMessage 发出的文本（折叠标记等空内容内部标记不计入）
+	// Text sent by sendUserMessage / sendMessage; fold markers are empty and not counted.
 	const sentMessages: string[] = [];
-	// 每次 sendMessage 的完整载荷（含 customType / details / options），供折叠与关联断言
+	// Full payload of each sendMessage, for fold and link checks.
 	const customMessages: { customType: string; content: any; display: boolean; details: any; options: any }[] = [];
-	// appendEntry 写入的 CustomEntry（不进 LLM 上下文）
+	// CustomEntry rows written by appendEntry; never go to the LLM.
 	const entries: { customType: string; data: any }[] = [];
-	// registerEntryRenderer 注册的渲染器（供决策卡片渲染断言）
+	// Renderers from registerEntryRenderer, used by decision-card render checks.
 	const entryRenderers = new Map<string, (entry: any, options: any, theme: any) => any>();
 	let abortedTurns = 0;
 	const notifications: { msg: string; kind: string }[] = [];
-	const sessionEntries: any[] = [{ type: "message" }]; // 默认已有对话消息（模拟非空会话）；需要全新会话的用例显式清空
+	const sessionEntries: any[] = [{ type: "message" }]; // A non-empty session by default; tests that need a fresh session clear this.
 	let leafId: string | null = null;
 	const setLeaf = (id: string | null) => {
 		leafId = id;
@@ -31,13 +30,13 @@ export function createMockRuntime() {
 	let idle = true;
 	let editorText = "";
 	let pendingMessages = 0;
-	// 模拟 pi 的原始终端按键广播：watchdog 注册的 onTerminalInput 监听器都在这里
+	// Raw key broadcasts like real pi; every onTerminalInput listener the watchdog registered sits here.
 	const inputListeners = new Set<(data: string) => any>();
 
-	const ctx: any = {
+	const makeCtx = (): any => ({
 		isIdle: () => idle,
 		hasPendingMessages: () => pendingMessages > 0,
-		// 模拟真实 pi：中止当前 agent 回合并回到空闲
+		// Like real pi: abort the running turn and go idle.
 		abort: () => {
 			abortedTurns++;
 			idle = true;
@@ -57,10 +56,11 @@ export function createMockRuntime() {
 				return () => inputListeners.delete(handler);
 			},
 		},
-	};
+	});
+	const ctx: any = makeCtx();
 
 	let entrySeq = 0;
-	/** 模拟真实 pi：消息随回合落盘为条目并推进 leaf */
+	/** Like real pi: save the message as a row and move the leaf. */
 	const pushMessage = (message: any) => {
 		entrySeq += 1;
 		const entry: any = { type: "message", id: `m${entrySeq}`, message };
@@ -86,7 +86,7 @@ export function createMockRuntime() {
 		},
 		registerTool: (tool: any) => {
 			tools.set(tool.name, tool);
-			activeTools.add(tool.name); // 模拟真实 pi：注册的工具默认进入 active 集合
+			activeTools.add(tool.name); // Like real pi: a registered tool joins the active set.
 		},
 		registerCommand: (name: string, def: any) => commands.set(name, def),
 		registerMessageRenderer: () => {},
@@ -97,7 +97,7 @@ export function createMockRuntime() {
 		sendMessage: (message: any, options?: any) => {
 			customMessages.push({ ...message, options });
 			const text = typeof message.content === "string" ? message.content : "";
-			// 折叠终止标记是空内容内部标记，不算「发给模型的文本」
+			// Fold markers are empty internal markers, not text sent to the model.
 			if (text) sentMessages.push(text);
 			pushMessage({
 				role: "custom",
@@ -107,11 +107,11 @@ export function createMockRuntime() {
 				details: message.details,
 				timestamp: Date.now(),
 			});
-			if (options?.triggerTurn) idle = false; // custom message 触发新一轮运行
+			if (options?.triggerTurn) idle = false; // a custom message triggers a new run
 		},
 		sendUserMessage: async (content: string, options?: any) => {
-			// 模拟真实 pi：expandPromptTemplates 时斜杠命令在 prompt 入口被拦截执行，
-			// 不会作为用户消息发送，也不会触发 agent 运行
+			// Like real pi: with expandPromptTemplates, a slash command runs at the prompt gate,
+			// so it is not sent as a user message and does not start a run.
 			if (options?.expandPromptTemplates !== false && content.startsWith("/")) {
 				const space = content.indexOf(" ");
 				const name = space === -1 ? content.slice(1) : content.slice(1, space);
@@ -134,12 +134,13 @@ export function createMockRuntime() {
 		},
 	};
 
-	/** 触发一个事件（按注册顺序调用所有 handler） */
-	const emit = async (name: string, event: any = {}) => {
-		for (const h of handlers.get(name) ?? []) await h(event, ctx);
+	/** Fire an event, calling every handler in order; ctxOverride stands in for a new ctx after session replacement. */
+	const emit = async (name: string, event: any = {}, ctxOverride?: any) => {
+		const eventCtx = ctxOverride ?? ctx;
+		for (const h of handlers.get(name) ?? []) await h(event, eventCtx);
 	};
 
-	/** 按 pi 的 context 钩子语义跑一遍折叠（deep-copy 由真实 pi 负责；这里直接改数组副本） */
+	/** Run the fold like pi's context hook; real pi deep-copies, here we change the array copy directly. */
 	const emitContext = async (messages: any[]) => {
 		let current = messages;
 		for (const h of handlers.get("context") ?? []) {
@@ -149,7 +150,7 @@ export function createMockRuntime() {
 		return current;
 	};
 
-	/** 触发 tool_call 钩子并返回第一个非空结果（模拟 pi 的拦截语义） */
+	/** Fire the tool_call hook and return the first non-empty result, like pi's block behavior. */
 	const emitToolCall = async (event: any) => {
 		for (const h of handlers.get("tool_call") ?? []) {
 			const result = await h({ type: "tool_call", ...event }, ctx);
@@ -158,7 +159,7 @@ export function createMockRuntime() {
 		return undefined;
 	};
 
-	/** 触发 message_end 钩子并返回第一个非空结果（模拟 pi 的消息替换） */
+	/** Fire the message_end hook and return the first non-empty result, like pi's message rewrite. */
 	const emitMessageEnd = async (message: any) => {
 		for (const h of handlers.get("message_end") ?? []) {
 			const result = await h({ type: "message_end", message }, ctx);
@@ -167,34 +168,34 @@ export function createMockRuntime() {
 		return undefined;
 	};
 
-	/** 当前会话分支对应的 AgentMessage 列表（custom message 以 role:"custom" 呈现） */
+	/** AgentMessage list for the current branch; custom messages show up as role:"custom". */
 	const currentMessages = () => sessionEntries.map((e: any) => e?.message).filter((m: any) => m !== undefined);
 
-	/** 模拟用户按下一个键（上下选择命令、翻历史等任意按键） */
+	/** Simulate a key press (picking a command, history, ...); any key counts. */
 	const pressKey = () => {
 		for (const l of inputListeners) l("x");
 	};
 
-	/** 模拟 agent 跑完一轮：回到空闲并触发 agent_settled（watchdog 由此重新倒计时） */
+	/** Simulate a finished run: go idle and fire agent_settled, so the watchdog counts down again. */
 	const settleAfterRun = async () => {
 		entrySeq += 1;
 		const entry: any = { type: "message", id: `s${entrySeq}` };
-		sessionEntries.push(entry); // 模拟本轮产生了一条会话消息
+		sessionEntries.push(entry); // this run produced one session message
 		setLeaf(entry.id);
-		// 正常结束的 assistant 消息 stopReason 为 "stop"（对应真实的 pi 行为）
+		// Like real pi: a clean assistant message ends with stopReason "stop".
 		await emit("agent_end", { messages: [{ role: "assistant", content: [], stopReason: "stop" }] });
 		idle = true;
 		await emit("agent_settled");
 	};
 
-	/** 模拟被中止的回合结束（如用户按 ESC）：不追加新消息，assistant 消息 stopReason 为 "aborted" */
+	/** Simulate an aborted turn (user pressed ESC): no new message, assistant stopReason "aborted". */
 	const settleAbortedTurn = async () => {
 		await emit("agent_end", { messages: [{ role: "assistant", content: [], stopReason: "aborted" }] });
 		idle = true;
 		await emit("agent_settled");
 	};
 
-	/** 创建一个全新的插件实例（default(pi) 每次调用都创建全新 state） */
+	/** Create a fresh plugin instance; default(pi) makes fresh state on every call. */
 	const newPlugin = async () => {
 		const mod = await import("../../index.ts");
 		mod.default(pi as any);
@@ -203,6 +204,7 @@ export function createMockRuntime() {
 	return {
 		pi,
 		ctx,
+		makeCtx,
 		emit,
 		emitContext,
 		emitToolCall,

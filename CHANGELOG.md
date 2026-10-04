@@ -6,7 +6,8 @@
 
 ### 改变
 
-- **TUI 去噪：一次检查只留一张决策卡片**。发起检查不再发 `ui.notify`（info 通知在 pi 里是永久时间线行）；`stop_watchdog` 的调用/结果行被隐藏（`renderShell: "self"` + 空 `renderCall`/`renderResult`）；`ctx.abort()` 产生的幻影 `Error: This operation was aborted` 消息在决策窗口内被清成空消息。常驻模式下「挂起 vs 已停止」直接标注在卡片上，不再另发提示行。
+- **TUI 去噪：一次检查只留一张决策卡片**。发起检查不再发 `ui.notify`（info 通知在 pi 里是永久时间线行）；`stop_watchdog` 的调用/结果行被隐藏（`renderShell: "self"` + 空 `renderCall`/`renderResult`）；`ctx.abort()` 产生的幻影 `Error: This operation was aborted` 消息在本插件主动中止后（决策窗口内与窗口外）都被清成空消息。常驻模式下「挂起 vs 已停止」直接标注在卡片上，不再另发提示行。
+- **`stop_watchdog` 支持主动调用**：AI 真正完工（或在等用户决策）时，不必等倒计时归零，可在工作回合末尾直接调用它收尾，省掉一次「干等 timeout + 空决策往返」；普通模式彻底停止，`mode=keep` 下挂起。工具 description 与「未运行」提示文案随之改写，abort 幻影消息的清理也扩展到决策窗口外（仅限本插件刚触发的 abort，真实 provider 错误照常显示）。
 - **催促拆成「决策回合 + 继续消息」**：空闲超时后先发一条禁止干活的决策消息（除 `stop_watchdog` 外的工具被拦截），AI 回文字 = 还有活，watchdog 随即发继续消息触发真正的工作回合；AI 调 `stop_watchdog` = 停止。
 - **上下文回滚（beta，opt-in）→ 上下文折叠（默认开启）**：决策交换在每次 provider 请求前被移除（决策消息 + AI 回复 + 被拦截的工具对），只保留继续消息；非破坏性，不改写会话记录，无需 `navigateTree` / 命令跳板。
 
@@ -25,6 +26,7 @@
 
 ### 修复
 
+- **会话替换（`/clear`、`/resume`、`/fork`）后不再触碰失效的旧 ctx**：`startWatchdog` 现在把新会话的 `ctx` 传给 `teardown`，`session_shutdown` 也会清空缓存的 `activeCtx`，修掉 `This extension ctx is stale after session replacement` 报错。
 - **决策回合被 `Esc` 中止时不再误判为「还有活 → 继续」**：中止发生在决策窗口内时按 `superseded` 收口（不发继续消息、整段交换折叠），并在中止的回合里夹有真实用户消息时提示「插话可能未被处理，请重发」。
 
 ### 文档

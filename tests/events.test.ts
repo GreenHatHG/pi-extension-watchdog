@@ -11,7 +11,7 @@ afterEach(() => {
 	vi.useRealTimers();
 });
 
-it("发布启动、停止状态并响应状态查询", async () => {
+it("publishes start/stop state and answers a state query", async () => {
 	const rt = await setup();
 	const states: any[] = [];
 	rt.pi.events.on("watchdog:state", (state: unknown) => states.push(state));
@@ -31,7 +31,7 @@ it("发布启动、停止状态并响应状态查询", async () => {
 	expect(states.at(-1)).toMatchObject({ running: false, suspended: false, keepAlive: false });
 });
 
-it("keep 模式挂起发布 running=false，新用户消息恢复为 true", async () => {
+it("keep mode pause publishes running=false; a new user message brings it back to true", async () => {
 	const rt = await setup();
 	const states: any[] = [];
 	rt.pi.events.on("watchdog:state", (state: unknown) => states.push(state));
@@ -40,11 +40,11 @@ it("keep 模式挂起发布 running=false，新用户消息恢复为 true", asyn
 	await rt.tools.get("stop_watchdog").execute("stop", {}, undefined, undefined, rt.ctx);
 	expect(states.at(-1)).toMatchObject({ running: false, suspended: true, keepAlive: true });
 
-	await rt.emit("input", { text: "下一项任务", source: "interactive" });
+	await rt.emit("input", { text: "next task", source: "interactive" });
 	expect(states.at(-1)).toMatchObject({ running: true, suspended: false, keepAlive: true });
 });
 
-it("reload shutdown 不广播瞬时 false", async () => {
+it("a reload shutdown does not broadcast a momentary false", async () => {
 	process.env.PI_WATCHDOG = "timeout=10 mode=keep";
 	const rt = await setup();
 	const states: any[] = [];
@@ -56,4 +56,24 @@ it("reload shutdown 不广播瞬时 false", async () => {
 
 	await rt.emit("session_shutdown", { reason: "reload" });
 	expect(states).toHaveLength(count);
+});
+
+it("session replacement (/clear): starts with the new ctx after the old one goes stale, without touching the old one", async () => {
+	process.env.PI_WATCHDOG = "timeout=10";
+	const rt = await setup();
+	// the old session starts, activeCtx points at it
+	await rt.emit("session_start", { reason: "startup" });
+
+	// pi lifecycle: the old ctx is still valid during old-session shutdown; then it goes stale and the new session brings a new ctx.
+	await rt.emit("session_shutdown", { reason: "new" });
+	Object.defineProperty(rt.ctx, "ui", {
+		configurable: true,
+		get() {
+			throw new Error("stale extension ctx");
+		},
+	});
+
+	const replacementCtx = rt.makeCtx();
+	await expect(rt.emit("session_start", { reason: "new" }, replacementCtx)).resolves.toBeUndefined();
+	expect(rt.statusBars.get("watchdog")).toBeDefined();
 });

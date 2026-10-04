@@ -14,7 +14,7 @@ afterEach(() => {
 	delete process.env.PI_WATCHDOG_ON_STOP;
 });
 
-/** 轮询等钩子文件出现（spawn 是异步分离进程，无回调可 await） */
+/** Poll until the hook file shows up (spawn is an async detached process, so there is no callback to await). */
 async function waitForFile(ms = 3000): Promise<boolean> {
 	const deadline = Date.now() + ms;
 	while (Date.now() < deadline) {
@@ -24,16 +24,16 @@ async function waitForFile(ms = 3000): Promise<boolean> {
 	return false;
 }
 
-it("stop_watchdog 触发 PI_WATCHDOG_ON_STOP 钩子（写 exit 文件）", async () => {
+it("stop_watchdog fires the PI_WATCHDOG_ON_STOP hook (writes the exit file)", async () => {
 	process.env.PI_WATCHDOG = "timeout=60";
 	process.env.PI_WATCHDOG_ON_STOP = `echo 0 > ${exitFile}`;
 	const rt = await setup();
 	await rt.emit("session_start", { reason: "startup" });
 
-	// 催促一轮后 AI 调 stop_watchdog
+	// after one nudge the AI calls stop_watchdog
 	await vi.advanceTimersByTimeAsync(61_000);
 	await rt.settleAfterRun();
-	vi.useRealTimers(); // 轮询与子进程都依赖真实时钟
+	vi.useRealTimers(); // polling and the child process both need the real clock
 	const tool = rt.tools.get("stop_watchdog");
 	expect(tool).toBeDefined();
 	await tool.execute("t1", {}, undefined, undefined, rt.ctx);
@@ -42,7 +42,7 @@ it("stop_watchdog 触发 PI_WATCHDOG_ON_STOP 钩子（写 exit 文件）", async
 	expect(readFileSync(exitFile, "utf8").trim()).toBe("0");
 });
 
-it("未设置 PI_WATCHDOG_ON_STOP 时不执行任何钩子", async () => {
+it("with no PI_WATCHDOG_ON_STOP, no hook runs", async () => {
 	process.env.PI_WATCHDOG = "timeout=60";
 	const rt = await setup();
 	await rt.emit("session_start", { reason: "startup" });

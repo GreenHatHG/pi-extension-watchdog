@@ -18,7 +18,7 @@ pi 插件：自动继续监控。AI 停下后自动替你催它继续，直到�
 
 ### 故事 1：挂机等 AI 跑完，不用手动敲「继续」
 
-AI 有时会因为网络抖动、或「自以为任务完成」而中途停下。watchdog 会先发一条**决策检查**（这一回合禁止干活）：AI 还有活就回一句文字，watchdog 随即发出真正的继续指令；AI 真正完成时，会在决策检查里调用 `stop_watchdog` 工具收尾，监控随之停止。
+AI 有时会因为网络抖动、或「自以为任务完成」而中途停下。watchdog 会先发一条**决策检查**（这一回合禁止干活）：AI 还有活就回一句文字，watchdog 随即发出真正的继续指令；AI 真正完成时，既可以在决策检查里调用 `stop_watchdog` 工具收尾，也可以不等倒计时、在工作回合末尾直接调用它，监控随之停止。
 
 ```
 /watchdog                       # 空闲 60s 催一次，默认文案，最多催 50 次
@@ -112,6 +112,8 @@ AI 停止输出、进入空闲后开始倒计时；倒计时期间 AI 再次运�
   - 调 `stop_watchdog` = 没活 / 在等你。
 
   AI 的这句回复会在落盘前被剥离（带 `stop_watchdog` 时也只保留工具调用块以维持配对），不会进会话文件与压缩摘要。每次检查的结果会以一张**决策卡片**留在 TUI 时间线里（`pi-watchdog:decision`，TUI-only entry）：显示这次是「继续 / AI 主动停止 / 用户接管作废」；已折叠的 AI 回复默认收成一行灰字提示，全屏下点击卡片或按 `ctrl+o` 展开才看全文（落盘截断 300 字）。卡片不进模型上下文，也不参与折叠。常驻模式下 AI 主动停止时，卡片直接标注「常驻监控挂起，下次发消息恢复」，不再另发一条提示行。
+
+  `stop_watchdog` 不只在决策回合可调：AI 真正完工（或只在等你决策）时，可以不等倒计时、在工作回合末尾直接调用它，省掉一次「干等 timeout + 空决策往返」。这时监控同样停止（常驻模式下则挂起）。
 - **继续消息**：决策结果为「继续」时才发出，是真正触发工作回合的那条。固定触发行 + 可选追加指令：
   > [Automated, not user input] If work remains, continue working (no reply needed). If waiting on a user decision, don't change code — state what you need, then call stop_watchdog as your final action. If no work remains and no decision is pending, call stop_watchdog to end the turn.
 
@@ -124,7 +126,7 @@ AI 停止输出、进入空闲后开始倒计时；倒计时期间 AI 再次运�
 
 - 发起检查时不再发 `ui.notify`（info 通知在 pi 里是**永久**时间线行，不是临时 toast）——检查次数由卡片与状态栏体现。
 - `stop_watchdog` 的调用/结果行被隐藏（`renderShell: "self"` + 渲染零行的空 `renderCall`/`renderResult`）；工具本身照常注册、照常进模型上下文。
-- `stop_watchdog` 触发的回合中止（`ctx.abort()`）可能被 provider 落成一条 `stopReason: "error"` 的幻影 assistant 消息，TUI 会渲染成红字 `Error: ...`。决策窗口内这条消息被清成空消息，界面上不留痕迹；决策窗口外的真实错误不受影响。
+- `stop_watchdog` 触发的回合中止（`ctx.abort()`）可能被 provider 落成一条 `stopReason: "error"` 的幻影 assistant 消息，TUI 会渲染成红字 `Error: ...`。这条在本插件主动 abort 后（决策窗口内与窗口外都算）被清成空消息，界面上不留痕迹；其它来源的真实错误不受影响。
 
 状态栏实时显示（倒计时秒数、已催促次数会随实际情况变化）：
 
@@ -145,7 +147,7 @@ watchdog 不是零成本的，开启后有三处额外开销，都是小头，�
 | 决策回合 | 每次催促多一次模型请求 | 决策消息很短、模型只回一句文字；这一回合**不干活**，是上下文折叠得以成立的前提 |
 | 每次催促 | 继续消息约 65 token + 你设置的追加指令 | 折叠后只有这条继续消息留在上下文末尾，AI 的回应也随之留下 |
 | AI 收尾 | 一次工具调用往返 | `stop_watchdog` 的调用和返回（一个词 `OK.`）；该交换会被一起折叠掉，不再累积 |
-| 工具定义 | 每次请求重复发送 | 注册后随本会话所有请求发出：一句描述（约 17 token） + 空参数结构 |
+| 工具定义 | 每次请求重复发送 | 注册后随本会话所有请求发出：一段简短描述（约 40 token） + 空参数结构 |
 
 不算在开销里的：AI 被催促后继续干活的正常消耗——那是你本来就要它干的活，watchdog 只是替你敲了「继续」。挂机等待期间 watchdog 只在本地倒计时（改状态栏、看输入），不发任何请求；它唯一产生的就是那条催促消息。
 
@@ -161,7 +163,7 @@ const TOOL_NAME = "stop_watchdog";
 pi.registerTool({
     name: TOOL_NAME,
     label: "停止自动继续",
-    description: "Ends the turn immediately; call only after a watchdog nudge when no work remains.",
+    description: "Ends the turn immediately. Call it yourself once no work remains — no need to wait for a watchdog nudge; in keep mode this suspends monitoring until the user's next message.",
     parameters: Type.Object({}),
     ...
 }
@@ -169,10 +171,10 @@ pi.registerTool({
 
 ### 缓存、token 与上下文占用
 
-工具本身只需上面一句描述即可正确使用；下面是监控对 prompt cache、token 消耗和上下文占用的影响，写给维护者和想理解成本机制的读者：
+工具本身只需上面那段描述即可正确使用；下面是监控对 prompt cache、token 消耗和上下文占用的影响，写给维护者和想理解成本机制的读者：
 
-- **工具定义按需注入**：`stop_watchdog` 在监控首次启动时才注册，从未启动过监控的会话里，请求中根本没有这个工具，不占 token。给 AI 看的 description 也压缩成一句话——工具描述会随每次请求重复发送，属于常驻开销。
-- **描述短、触发行长的分工**：description 短，触发行长。两者都会反复进请求，但计费不同：description 是常驻开销，每次请求都按字节收费，所以只留一句话——何时能调、调完立即结束回合。触发行按触发事件收费，只出现在继续消息里；它是 AI 学会用该工具的完整来源，尤其在中途开启的会话里，没有它 AI 完工后不会主动调用，所以要写长。把触发行塞进 description，等于每次请求都为它付费；只留 description 不写触发行，AI 又不知道如何收尾。
+- **工具定义按需注入**：`stop_watchdog` 在监控首次启动时才注册，从未启动过监控的会话里，请求中根本没有这个工具，不占 token。给 AI 看的 description 也压缩成简短一两句——工具描述会随每次请求重复发送，属于常驻开销。
+- **描述短、触发行长的分工**：description 短，触发行长。两者都会反复进请求，但计费不同：description 是常驻开销，每次请求都按字节收费，所以只留一两句话——何时能调、调完立即结束回合。触发行按触发事件收费，只出现在继续消息里；它是 AI 学会用该工具的完整来源，尤其在中途开启的会话里，没有它 AI 完工后不会主动调用，所以要写长。把触发行塞进 description，等于每次请求都为它付费；只留 description 不写触发行，AI 又不知道如何收尾。
 - **注册后永不移出**：tools 定义位于请求前缀（system prompt + tools）中，中途增删一个工具，prompt cache（服务端对完全相同前缀的缓存：命中部分计费更低、响应更快）就会从改动处整体失效。首次注册只损失一次缓存，之后即使 `/watchdog stop` 工具也保持注册，前缀字节级缓存稳定。
 - **催促只追加、不改动前缀**：继续消息追加在上下文末尾，前缀不动，缓存不受影响；决策消息与收尾往返会被折叠掉，不再累积。
 - **停止时立即截断**：AI 调用 `stop_watchdog` 后回合立即中止（等同按 Esc），工具调用之后的收尾文字不再生成，省掉这部分输出 token（abort 前已落盘的文字截不掉）。

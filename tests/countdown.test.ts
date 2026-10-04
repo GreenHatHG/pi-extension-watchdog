@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { DEFAULT_MESSAGE, continuationText as nudge } from "../index.ts";
+import { DEFAULT_MESSAGE, continuationText as nudge } from "../src/constants.ts";
 import { nudgeMessages, setup } from "./helpers/setup.js";
 
 beforeEach(() => {
@@ -10,126 +10,126 @@ afterEach(() => {
 	vi.useRealTimers();
 });
 
-it("首次启动且会话无消息 → 不倒计时，等首轮 agent_settled 后才开始，用默认文案", async () => {
+it("first start with an empty session → no countdown until the first agent_settled, using the default text", async () => {
 	const rt = await setup();
-	rt.sessionEntries.length = 0; // 模拟全新会话
+	rt.sessionEntries.length = 0; // simulate a brand-new session
 	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx);
-	expect(rt.activeTools.has("stop_watchdog")).toBe(true); // 启动后工具激活
+	expect(rt.activeTools.has("stop_watchdog")).toBe(true); // tool is active after start
 
 	await vi.advanceTimersByTimeAsync(1300);
-	expect(nudgeMessages(rt)).toHaveLength(0); // 无消息时不催促
-	expect(rt.notifications.some((n) => n.msg.includes("暂无消息"))).toBe(true);
+	expect(nudgeMessages(rt)).toHaveLength(0); // no messages, so no nudge
+	expect(rt.notifications.some((n) => n.msg.includes("no messages yet"))).toBe(true);
 
-	await rt.settleAfterRun(); // AI 第一轮结束 → 开始倒计时
-	await vi.advanceTimersByTimeAsync(1200); // 决策回合
+	await rt.settleAfterRun(); // first AI run ends → countdown starts
+	await vi.advanceTimersByTimeAsync(1200); // decision turn
 	expect(nudgeMessages(rt)).toHaveLength(1);
-	expect(rt.sentMessages).not.toContain(DEFAULT_MESSAGE); // 决策回合还没结束，继续消息尚未发出
+	expect(rt.sentMessages).not.toContain(DEFAULT_MESSAGE); // decision turn not done yet, no continue message
 
-	await rt.settleAfterRun(); // 决策回合结束（模型回文字）→ 发继续消息
+	await rt.settleAfterRun(); // decision turn ends (model replied text) → continue message
 	expect(rt.sentMessages.filter((m) => m === DEFAULT_MESSAGE)).toHaveLength(1);
 
 	await rt.settleAfterRun();
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
-	expect(rt.activeTools.has("stop_watchdog")).toBe(true); // 常驻注册，停止后工具仍保留
+	expect(rt.activeTools.has("stop_watchdog")).toBe(true); // registered for good, kept after stop
 });
 
-it("AI 运行中不催促；停止后重新倒计时再催促", async () => {
+it("no nudge while the AI runs; after it stops, countdown and nudge again", async () => {
 	const rt = await setup();
-	await rt.commands.get("watchdog").handler("timeout=1 message=测试继续", rt.ctx);
+	await rt.commands.get("watchdog").handler("timeout=1 message=test continue", rt.ctx);
 	await rt.settleAfterRun();
 
 	await rt.emit("agent_start");
 	await vi.advanceTimersByTimeAsync(1200);
-	expect(nudgeMessages(rt)).toHaveLength(0); // 运行期间不催促
+	expect(nudgeMessages(rt)).toHaveLength(0); // no nudge while running
 
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(600);
-	await rt.emit("agent_start"); // AI 又跑一下（倒计时被取消重建）
+	await rt.emit("agent_start"); // AI runs again (countdown is cancelled and rebuilt)
 	await vi.advanceTimersByTimeAsync(600);
 	expect(nudgeMessages(rt)).toHaveLength(0);
 
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1100);
 	expect(nudgeMessages(rt)).toHaveLength(1);
-	await rt.settleAfterRun(); // 决策回合结束 → 继续消息
-	expect(rt.sentMessages.at(-1)).toBe(nudge("测试继续"));
-	expect(rt.state.idle).toBe(false); // 继续消息触发新一轮，模拟 AI 开始运行
+	await rt.settleAfterRun(); // decision turn ends → continue message
+	expect(rt.sentMessages.at(-1)).toBe(nudge("test continue"));
+	expect(rt.state.idle).toBe(false); // the continue message starts a new run, so the AI is running
 });
 
-it("max= 次数上限：达到后自动停止并通知", async () => {
+it("max= cap: stops and notifies on reaching it", async () => {
 	const rt = await setup();
-	await rt.commands.get("watchdog").handler("timeout=1 max=2 message=上限测试", rt.ctx);
+	await rt.commands.get("watchdog").handler("timeout=1 max=2 message=cap test", rt.ctx);
 	for (let i = 0; i < 2; i++) {
-		await rt.settleAfterRun(); // 上一轮结束 → 倒计时
-		await vi.advanceTimersByTimeAsync(1100); // 决策回合
-		await rt.settleAfterRun(); // 决策回合结束 → 继续消息
+		await rt.settleAfterRun(); // last run ends → countdown
+		await vi.advanceTimersByTimeAsync(1100); // decision turn
+		await rt.settleAfterRun(); // decision turn ends → continue message
 	}
 	expect(nudgeMessages(rt)).toHaveLength(2);
-	expect(rt.sentMessages.filter((m) => m === nudge("上限测试"))).toHaveLength(2);
+	expect(rt.sentMessages.filter((m) => m === nudge("cap test"))).toHaveLength(2);
 
 	await rt.settleAfterRun();
-	await vi.advanceTimersByTimeAsync(1100); // 第 3 次应被拦截并自动停止
+	await vi.advanceTimersByTimeAsync(1100); // the 3rd should be blocked and auto-stop
 	expect(nudgeMessages(rt)).toHaveLength(2);
-	expect(rt.notifications.some((n) => n.msg.includes("已自动停止"))).toBe(true);
+	expect(rt.notifications.some((n) => n.msg.includes("auto-stopped"))).toBe(true);
 });
 
-it("手动 stop 后不再催促；status 正确反映运行/未运行状态", async () => {
+it("after a manual stop no more nudges; status shows running/not running", async () => {
 	const rt = await setup();
-	await rt.commands.get("watchdog").handler("timeout=1 message=手动测试", rt.ctx);
+	await rt.commands.get("watchdog").handler("timeout=1 message=manual test", rt.ctx);
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 	await vi.advanceTimersByTimeAsync(1200);
 	expect(nudgeMessages(rt)).toHaveLength(0);
 
 	rt.notifications.length = 0;
 	await rt.commands.get("watchdog").handler("status", rt.ctx);
-	expect(rt.notifications.some((n) => n.msg.includes("未在运行"))).toBe(true);
+	expect(rt.notifications.some((n) => n.msg.includes("not running"))).toBe(true);
 
-	await rt.commands.get("watchdog").handler("", rt.ctx); // 无参数 = 默认参数启动
+	await rt.commands.get("watchdog").handler("", rt.ctx); // no args = default settings
 	await rt.commands.get("watchdog").handler("status", rt.ctx);
-	expect(rt.notifications.some((n) => n.msg.includes("运行中"))).toBe(true);
+	expect(rt.notifications.some((n) => n.msg.includes("running"))).toBe(true);
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });
 
-it("status 细分：倒计时中 / 输入暂停 / 操作暂停 / 等待 AI 空闲", async () => {
+it("status detail: counting down / typing pause / key pause / waiting for idle", async () => {
 	const rt = await setup();
-	await rt.commands.get("watchdog").handler("timeout=60 message=状态测试", rt.ctx);
+	await rt.commands.get("watchdog").handler("timeout=60 message=status test", rt.ctx);
 
 	await rt.commands.get("watchdog").handler("status", rt.ctx);
-	expect(rt.notifications.some((n) => n.msg.includes("后催促"))).toBe(true);
+	expect(rt.notifications.some((n) => n.msg.includes("nudge in"))).toBe(true);
 
-	rt.state.editorText = "草稿"; // 编辑器有未发送文字 → ticker 轮询后暂停
+	rt.state.editorText = "draft"; // unsent editor text → the ticker pauses after a poll
 	await vi.advanceTimersByTimeAsync(1100);
 	await rt.commands.get("watchdog").handler("status", rt.ctx);
-	expect(rt.notifications.some((n) => n.msg.includes("输入中暂停"))).toBe(true);
+	expect(rt.notifications.some((n) => n.msg.includes("you're typing"))).toBe(true);
 
 	rt.state.editorText = "";
-	await vi.advanceTimersByTimeAsync(2100); // 超过按键宽限期，ticker 恢复倒计时
-	rt.pressKey(); // 倒计时中按键 → 立即进入操作暂停
+	await vi.advanceTimersByTimeAsync(2100); // past the key grace, ticker restarts the countdown
+	rt.pressKey(); // a key during the countdown → key pause right away
 	await rt.commands.get("watchdog").handler("status", rt.ctx);
-	expect(rt.notifications.some((n) => n.msg.includes("操作中暂停"))).toBe(true);
+	expect(rt.notifications.some((n) => n.msg.includes("pressing keys"))).toBe(true);
 
-	await rt.emit("agent_start"); // AI 运行中 → 等待空闲
+	await rt.emit("agent_start"); // AI running → waiting for idle
 	await rt.commands.get("watchdog").handler("status", rt.ctx);
-	expect(rt.notifications.some((n) => n.msg.includes("等待 AI 空闲"))).toBe(true);
+	expect(rt.notifications.some((n) => n.msg.includes("waiting for the AI to go idle"))).toBe(true);
 });
 
-it("运行中重新 /watchdog：重置参数、文案与催促计数，旧倒计时不残留", async () => {
+it("re-running /watchdog while running: resets args, text and nudge count, no stale countdown", async () => {
 	const rt = await setup();
-	await rt.commands.get("watchdog").handler("timeout=1 max=5 message=旧文案", rt.ctx);
+	await rt.commands.get("watchdog").handler("timeout=1 max=5 message=old text", rt.ctx);
 	await rt.settleAfterRun();
-	await vi.advanceTimersByTimeAsync(1100); // 决策回合
-	await rt.settleAfterRun(); // 决策回合结束 → 旧文案继续消息
-	expect(rt.sentMessages.filter((m) => m === nudge("旧文案"))).toHaveLength(1);
+	await vi.advanceTimersByTimeAsync(1100); // decision turn
+	await rt.settleAfterRun(); // decision turn ends → old-text continue message
+	expect(rt.sentMessages.filter((m) => m === nudge("old text"))).toHaveLength(1);
 
-	await rt.commands.get("watchdog").handler("timeout=1 message=新文案", rt.ctx); // 运行中重入
+	await rt.commands.get("watchdog").handler("timeout=1 message=new text", rt.ctx); // restart while running
 	rt.notifications.length = 0;
 	await rt.commands.get("watchdog").handler("status", rt.ctx);
-	expect(rt.notifications.some((n) => n.msg.includes("已催 0/"))).toBe(true); // 计数清零
-	expect(rt.notifications.some((n) => n.msg.includes("已催 0/5"))).toBe(true); // 未指定 max 时沿用旧值
+	expect(rt.notifications.some((n) => n.msg.includes("nudged 0/"))).toBe(true); // count reset
+	expect(rt.notifications.some((n) => n.msg.includes("nudged 0/5"))).toBe(true); // max kept when not given
 
 	await rt.settleAfterRun();
-	await vi.advanceTimersByTimeAsync(1200); // 决策回合
-	await rt.settleAfterRun(); // 决策回合结束 → 新文案继续消息
-	expect(rt.sentMessages.filter((m) => m === nudge("旧文案"))).toHaveLength(1); // 旧参数/旧计时器已清
-	expect(rt.sentMessages.filter((m) => m === nudge("新文案"))).toHaveLength(1);
+	await vi.advanceTimersByTimeAsync(1200); // decision turn
+	await rt.settleAfterRun(); // decision turn ends → new-text continue message
+	expect(rt.sentMessages.filter((m) => m === nudge("old text"))).toHaveLength(1); // old args/timer cleared
+	expect(rt.sentMessages.filter((m) => m === nudge("new text"))).toHaveLength(1);
 });

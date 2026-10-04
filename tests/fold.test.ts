@@ -4,9 +4,9 @@ import {
 	DECISION_MESSAGE,
 	DECISION_MESSAGE_TYPE,
 	FOLD_MESSAGE_TYPE,
-	foldWatchdogContext,
 	continuationText as nudge,
-} from "../index.ts";
+} from "../src/constants.ts";
+import { foldWatchdogContext } from "../src/fold.ts";
 import { continuationMessages, nudgeMessages, setup } from "./helpers/setup.js";
 
 const EXCHANGE = "exchange-1";
@@ -41,7 +41,7 @@ const toolResult = (toolCallId: string, toolName: string) => ({
 });
 const user = (text: string) => ({ role: "user", content: text });
 
-it("continue 交换折叠成只保留继续消息", () => {
+it("a continue exchange folds down to just the continue message", () => {
 	const messages = [
 		user("task"),
 		nudgeMsg(),
@@ -52,12 +52,12 @@ it("continue 交换折叠成只保留继续消息", () => {
 	expect(foldWatchdogContext(messages)).toEqual([user("task"), continuationMsg(), user("later")]);
 });
 
-it("stop 交换连同被拦截的工具对被整体删除", () => {
+it("a stop exchange is dropped together with the blocked tool pair", () => {
 	const messages = [
 		user("task"),
 		nudgeMsg(),
 		assistant([
-			{ type: "toolCall", id: "c1", name: "edit", arguments: {} }, // 被拦截
+			{ type: "toolCall", id: "c1", name: "edit", arguments: {} }, // blocked
 			{ type: "toolCall", id: "cs", name: "stop_watchdog", arguments: {} },
 			{ type: "text", text: "done" },
 		]),
@@ -68,17 +68,17 @@ it("stop 交换连同被拦截的工具对被整体删除", () => {
 	expect(foldWatchdogContext(messages)).toEqual([user("task")]);
 });
 
-it("决策回合仍在进行（无终止标记）→ 原样保留，模型要能看到提示词", () => {
+it("decision turn still running (no end marker) → keep all, the model must see the prompt", () => {
 	const messages = [user("task"), nudgeMsg(), assistant([{ type: "text", text: "..." }])];
 	expect(foldWatchdogContext(messages)).toEqual(messages);
 });
 
-it("区间内混入真实用户消息 → fail closed，原样保留", () => {
-	const messages = [nudgeMsg(), user("等等"), continuationMsg()];
+it("a real user message inside the range → fail closed, keep all", () => {
+	const messages = [nudgeMsg(), user("wait"), continuationMsg()];
 	expect(foldWatchdogContext(messages)).toEqual(messages);
 });
 
-it("区间内混入其它插件的 custom 消息 → fail closed，原样保留", () => {
+it("a custom message from another plugin inside the range → fail closed, keep all", () => {
 	const messages = [
 		nudgeMsg(),
 		{ role: "custom", customType: "other:x", content: "x", display: false },
@@ -87,7 +87,7 @@ it("区间内混入其它插件的 custom 消息 → fail closed，原样保留"
 	expect(foldWatchdogContext(messages)).toEqual(messages);
 });
 
-it("多个交换各自独立折叠", () => {
+it("multiple exchanges fold independently", () => {
 	const messages = [
 		nudgeMsg("e1"),
 		assistant([]),
@@ -100,22 +100,22 @@ it("多个交换各自独立折叠", () => {
 	expect(foldWatchdogContext(messages)).toEqual([continuationMsg("e1"), user("after")]);
 });
 
-it("区间内混入压缩摘要等非消息角色 → fail closed，原样保留", () => {
+it("a non-message role such as a compaction summary inside the range → fail closed, keep all", () => {
 	const messages = [nudgeMsg(), { role: "compactionSummary", summary: "..." }, continuationMsg()];
 	expect(foldWatchdogContext(messages)).toEqual(messages);
 });
 
-it("没有决策消息的孤儿 continuation 原样保留", () => {
+it("an orphan continuation with no decision message is kept", () => {
 	const messages = [user("a"), continuationMsg(), user("b")];
 	expect(foldWatchdogContext(messages)).toEqual(messages);
 });
 
-it("无终态且后面已有新用户消息 → 原样保留", () => {
+it("no end state and a new user message after it → keep all", () => {
 	const messages = [nudgeMsg(), assistant([{ type: "text", text: "..." }]), user("interrupt")];
 	expect(foldWatchdogContext(messages)).toEqual(messages);
 });
 
-it("旧落盘消息 details 带未知字段（如旧版 version）仍正常折叠", () => {
+it("old saved messages with an unknown details field (like an old version) still fold", () => {
 	const legacyNudge = {
 		role: "custom",
 		customType: DECISION_MESSAGE_TYPE,
@@ -127,7 +127,7 @@ it("旧落盘消息 details 带未知字段（如旧版 version）仍正常折�
 	expect(foldWatchdogContext(messages)).toEqual([user("task"), continuationMsg(), user("later")]);
 });
 
-it("superseded 折叠标记同样终止区间", () => {
+it("a superseded fold marker also ends the range", () => {
 	const messages = [
 		user("task"),
 		nudgeMsg(),
@@ -143,7 +143,7 @@ it("superseded 折叠标记同样终止区间", () => {
 	expect(foldWatchdogContext(messages)).toEqual([user("task")]);
 });
 
-it("非关联的普通消息不受影响", () => {
+it("plain messages with no link are untouched", () => {
 	const messages = [user("a"), assistant([{ type: "text", text: "b" }]), user("c")];
 	expect(foldWatchdogContext(messages)).toEqual(messages);
 });
@@ -156,35 +156,35 @@ afterEach(() => {
 	vi.useRealTimers();
 });
 
-it("context 钩子：决策回合结束后请求视图里不再有决策交换", async () => {
+it("context hook: after the decision turn the request view has no decision exchange", async () => {
 	const rt = await setup();
-	await rt.commands.get("watchdog").handler("timeout=1 message=折叠测试", rt.ctx);
+	await rt.commands.get("watchdog").handler("timeout=1 message=fold test", rt.ctx);
 	await rt.settleAfterRun();
-	await vi.advanceTimersByTimeAsync(1100); // 决策回合
-	await rt.settleAfterRun(); // 决策回合结束（模型没调 stop）→ 继续消息
+	await vi.advanceTimersByTimeAsync(1100); // decision turn
+	await rt.settleAfterRun(); // decision turn ends (model did not call stop) → continue message
 
 	const folded = (await rt.emitContext(rt.currentMessages())) as any[];
 	expect(folded.some((m) => m.customType === DECISION_MESSAGE_TYPE)).toBe(false);
 	expect(folded.filter((m) => m.role === "custom").map((m) => m.customType)).toEqual([CONTINUATION_MESSAGE_TYPE]);
 });
 
-it("context 钩子：AI 调 stop_watchdog 后决策交换整体移除", async () => {
+it("context hook: after the AI calls stop_watchdog the whole decision exchange is removed", async () => {
 	const rt = await setup();
-	await rt.commands.get("watchdog").handler("timeout=1 message=停止折叠", rt.ctx);
+	await rt.commands.get("watchdog").handler("timeout=1 message=stop fold", rt.ctx);
 	await rt.settleAfterRun();
-	await vi.advanceTimersByTimeAsync(1100); // 决策回合
+	await vi.advanceTimersByTimeAsync(1100); // decision turn
 	await rt.tools.get("stop_watchdog").execute("t1", {}, undefined, undefined, rt.ctx);
-	await rt.settleAfterRun(); // 决策回合结束 → 落 stop 折叠标记
+	await rt.settleAfterRun(); // decision turn ends → stop fold marker
 
 	const folded = (await rt.emitContext(rt.currentMessages())) as any[];
 	expect(folded.filter((m) => m.role === "custom")).toHaveLength(0);
 });
 
-it("决策窗口内拦截除 stop_watchdog 外的工具，结算后恢复放行", async () => {
+it("inside the decision window every tool but stop_watchdog is blocked; after settling they pass again", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx);
 	await rt.settleAfterRun();
-	await vi.advanceTimersByTimeAsync(1100); // 决策回合开启
+	await vi.advanceTimersByTimeAsync(1100); // decision turn opens
 
 	const blocked = await rt.emitToolCall({ toolName: "bash", toolCallId: "c1", input: {} });
 	expect(blocked?.block).toBe(true);
@@ -193,29 +193,29 @@ it("决策窗口内拦截除 stop_watchdog 外的工具，结算后恢复放行"
 	const allowed = await rt.emitToolCall({ toolName: "stop_watchdog", toolCallId: "cs", input: {} });
 	expect(allowed).toBeUndefined();
 
-	await rt.settleAfterRun(); // 结算决策窗口
+	await rt.settleAfterRun(); // settle the decision window
 	const after = await rt.emitToolCall({ toolName: "bash", toolCallId: "c2", input: {} });
 	expect(after).toBeUndefined();
 });
 
-it("继续消息在决策回合结算后才发出，且仍是固定触发行文案", async () => {
+it("the continue message is sent only after the decision turn settles, and still uses the fixed trigger line", async () => {
 	const rt = await setup();
-	await rt.commands.get("watchdog").handler("timeout=1 message=延迟发送", rt.ctx);
+	await rt.commands.get("watchdog").handler("timeout=1 message=delayed send", rt.ctx);
 	await rt.settleAfterRun();
-	await vi.advanceTimersByTimeAsync(1100); // 决策回合
+	await vi.advanceTimersByTimeAsync(1100); // decision turn
 	expect(nudgeMessages(rt)).toHaveLength(1);
-	expect(continuationMessages(rt)).toHaveLength(0); // 尚未结算，继续消息未发
+	expect(continuationMessages(rt)).toHaveLength(0); // not settled yet, so no continue message
 
 	await rt.settleAfterRun();
 	expect(continuationMessages(rt)).toHaveLength(1);
-	expect(continuationMessages(rt)[0].content).toBe(nudge("延迟发送"));
+	expect(continuationMessages(rt)[0].content).toBe(nudge("delayed send"));
 });
 
-it("决策回合的模型回复在落盘前被清空；带工具调用时只保留工具调用块", async () => {
+it("the decision turn's model reply is cleared before saving; with a tool call only the tool call block stays", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx);
 	await rt.settleAfterRun();
-	await vi.advanceTimersByTimeAsync(1100); // 决策回合开启
+	await vi.advanceTimersByTimeAsync(1100); // decision turn opens
 
 	const ack = { role: "assistant", content: [{ type: "text", text: "ok, continuing" }], stopReason: "stop" };
 	const replaced = await rt.emitMessageEnd(ack);
@@ -224,29 +224,29 @@ it("决策回合的模型回复在落盘前被清空；带工具调用时只保�
 	const withTool = {
 		role: "assistant",
 		content: [
-			{ type: "thinking", thinking: "需要收尾", signature: "sig" },
+			{ type: "thinking", thinking: "need to wrap up", signature: "sig" },
 			{ type: "text", text: "all done" },
 			{ type: "toolCall", id: "cs", name: "stop_watchdog", arguments: {} },
 		],
 	};
 	const replacedWithTool = await rt.emitMessageEnd(withTool);
 	expect(replacedWithTool?.message.content).toEqual([
-		{ type: "thinking", thinking: "需要收尾", signature: "sig" },
+		{ type: "thinking", thinking: "need to wrap up", signature: "sig" },
 		{ type: "toolCall", id: "cs", name: "stop_watchdog", arguments: {} },
-	]); // 只剥掉 text；toolCall / thinking 保留（配对与签名）
+	]); // only text is stripped; toolCall / thinking stay (pairing and signature)
 
-	await rt.settleAfterRun(); // 决策窗口关闭
+	await rt.settleAfterRun(); // decision window closes
 	const normal = { role: "assistant", content: [{ type: "text", text: "hi" }] };
-	expect(await rt.emitMessageEnd(normal)).toBeUndefined(); // 不再干预普通回合
+	expect(await rt.emitMessageEnd(normal)).toBeUndefined(); // normal turns are untouched again
 });
 
-it("决策期间用户插话 → 本次检查作废、不发继续消息，决策交换仍被折叠", async () => {
+it("a user interjection during the decision turn → the check is void, no continue message, the exchange still folds", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx);
 	await rt.settleAfterRun();
-	await vi.advanceTimersByTimeAsync(1100); // 决策回合
+	await vi.advanceTimersByTimeAsync(1100); // decision turn
 
-	rt.state.pendingMessages = 1; // 用户排队了一条消息
+	rt.state.pendingMessages = 1; // the user queued one message
 	await rt.settleAfterRun();
 
 	expect(continuationMessages(rt)).toHaveLength(0);
@@ -254,7 +254,7 @@ it("决策期间用户插话 → 本次检查作废、不发继续消息，决�
 	const folded = (await rt.emitContext(rt.currentMessages())) as any[];
 	expect(folded.some((m) => m.customType === DECISION_MESSAGE_TYPE)).toBe(false);
 
-	// watchdog 仍在运行，用户回合结束后会重新倒计时
+	// the watchdog is still running, and counts down again after the user's turn
 	await rt.commands.get("watchdog").handler("status", rt.ctx);
-	expect(rt.notifications.some((n) => n.msg.includes("运行中"))).toBe(true);
+	expect(rt.notifications.some((n) => n.msg.includes("running"))).toBe(true);
 });

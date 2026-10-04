@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { DECISION_ENTRY_TYPE, continuationText as nudge } from "../index.ts";
+import { DECISION_ENTRY_TYPE, continuationText as nudge } from "../src/constants.ts";
 import { continuationMessages, nudgeMessages, setup } from "./helpers/setup.js";
 
 beforeEach(() => {
@@ -11,129 +11,129 @@ afterEach(() => {
 });
 
 /**
- * 模拟「用户按 ESC 中止当前回合」：
- * AI 先开始运行，然后这一轮以 assistant.stopReason === "aborted" 结束。
+ * Simulate "user pressed ESC to stop the running turn":
+ * the AI starts running, then the turn ends with assistant.stopReason === "aborted".
  */
 async function abortRunningTurn(rt: Awaited<ReturnType<typeof setup>>) {
-	rt.state.idle = false; // AI 正在跑
+	rt.state.idle = false; // the AI is running
 	await rt.emit("agent_start");
-	await rt.settleAbortedTurn(); // 用户按 ESC → 这一轮被中止
+	await rt.settleAbortedTurn(); // user pressed ESC → the turn was aborted
 }
 
-it("运行中被 ESC 中止 → 本次空闲不催促，状态栏显示已打断", async () => {
+it("ESC mid-run → no nudge this idle spell, status bar shows the stop", async () => {
 	const rt = await setup();
 	const states: any[] = [];
 	rt.pi.events.on("watchdog:state", (s: unknown) => states.push(s));
 
-	await rt.commands.get("watchdog").handler("timeout=1 message=ESC测试", rt.ctx);
-	await rt.settleAfterRun(); // 正常跑完一轮 → 本来会开始倒计时
+	await rt.commands.get("watchdog").handler("timeout=1 message=ESC test", rt.ctx);
+	await rt.settleAfterRun(); // one clean run → would normally start the countdown
 
 	await abortRunningTurn(rt);
 	expect(states.at(-1)).toMatchObject({ running: true, interrupted: true });
 
-	await vi.advanceTimersByTimeAsync(3000); // 远超 timeout，也不该催
+	await vi.advanceTimersByTimeAsync(3000); // far past the timeout, still no nudge
 	expect(nudgeMessages(rt)).toHaveLength(0);
-	expect(rt.statusBars.get("watchdog")).toContain("⏹"); // 状态栏不再骗人显示「AI 运行中」
+	expect(rt.statusBars.get("watchdog")).toContain("⏹"); // status bar no longer lies with "AI running"
 
 	rt.notifications.length = 0;
 	await rt.commands.get("watchdog").handler("status", rt.ctx);
-	expect(rt.notifications.some((n) => n.msg.includes("已被 ESC 打断"))).toBe(true);
+	expect(rt.notifications.some((n) => n.msg.includes("ESC-interrupted"))).toBe(true);
 
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });
 
-it("ESC 打断后，用户发下一条消息、AI 重新跑完 → 恢复正常倒计时与催促", async () => {
+it("after an ESC stop, the next user message and finished run bring back counting and nudges", async () => {
 	const rt = await setup();
-	await rt.commands.get("watchdog").handler("timeout=1 message=ESC恢复", rt.ctx);
+	await rt.commands.get("watchdog").handler("timeout=1 message=ESC resume", rt.ctx);
 	await rt.settleAfterRun();
 	await abortRunningTurn(rt);
 
 	await vi.advanceTimersByTimeAsync(3000);
-	expect(nudgeMessages(rt)).toHaveLength(0); // 打断期间不催
+	expect(nudgeMessages(rt)).toHaveLength(0); // no nudge while stopped
 
-	await rt.emit("input", { text: "继续", source: "interactive" }); // 用户真实消息 → 清掉打断标志
+	await rt.emit("input", { text: "continue", source: "interactive" }); // real user message → clears the stop flag
 	rt.state.idle = false;
 	await rt.emit("agent_start");
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1100);
-	expect(nudgeMessages(rt)).toHaveLength(1); // 恢复催促：先发决策回合
-	await rt.settleAfterRun(); // 决策回合结束 → 发继续消息
-	expect(rt.sentMessages.at(-1)).toBe(nudge("ESC恢复"));
+	expect(nudgeMessages(rt)).toHaveLength(1); // nudges resume: decision turn first
+	await rt.settleAfterRun(); // decision turn ends → continue message
+	expect(rt.sentMessages.at(-1)).toBe(nudge("ESC resume"));
 
 	await rt.settleAfterRun();
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });
 
-it("常驻模式下 ESC 打断同样生效，之后仍可继续监控", async () => {
+it("keep mode: an ESC stop still works, and monitoring can still go on", async () => {
 	const rt = await setup();
-	await rt.commands.get("watchdog").handler("timeout=1 mode=keep message=KEEP测试", rt.ctx);
+	await rt.commands.get("watchdog").handler("timeout=1 mode=keep message=KEEP test", rt.ctx);
 	await rt.settleAfterRun();
 	await abortRunningTurn(rt);
 
 	await vi.advanceTimersByTimeAsync(3000);
 	expect(nudgeMessages(rt)).toHaveLength(0);
 
-	await rt.emit("input", { text: "继续", source: "interactive" });
+	await rt.emit("input", { text: "continue", source: "interactive" });
 	rt.state.idle = false;
 	await rt.emit("agent_start");
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1100);
-	expect(nudgeMessages(rt)).toHaveLength(1); // 恢复催促：先发决策回合
-	await rt.settleAfterRun(); // 决策回合结束 → 发继续消息
-	expect(rt.sentMessages.at(-1)).toBe(nudge("KEEP测试"));
+	expect(nudgeMessages(rt)).toHaveLength(1); // nudges resume: decision turn first
+	await rt.settleAfterRun(); // decision turn ends → continue message
+	expect(rt.sentMessages.at(-1)).toBe(nudge("KEEP test"));
 
 	await rt.settleAfterRun();
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });
 
-it("扩展来源的新一轮不算用户回归，只有真实用户消息才解除打断", async () => {
+it("a run from another extension does not count as the user coming back; only a real user message clears the stop", async () => {
 	const rt = await setup();
-	await rt.commands.get("watchdog").handler("timeout=1 message=扩展来源", rt.ctx);
+	await rt.commands.get("watchdog").handler("timeout=1 message=extension source", rt.ctx);
 	await rt.settleAfterRun();
 	await abortRunningTurn(rt);
 
-	// 其它扩展注入的消息（source=extension）触发新一轮：不代表用户回来了
-	await rt.emit("input", { text: "扩展注入", source: "extension" });
+	// a message from another extension (source=extension) starts a run: not the user coming back
+	await rt.emit("input", { text: "extension inject", source: "extension" });
 	rt.state.idle = false;
 	await rt.emit("agent_start");
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(3000);
 	expect(nudgeMessages(rt)).toHaveLength(0);
 
-	// 真实用户消息才解除打断状态
-	await rt.emit("input", { text: "我来接手", source: "interactive" });
+	// only a real user message clears the stopped state
+	await rt.emit("input", { text: "taking over", source: "interactive" });
 	rt.state.idle = false;
 	await rt.emit("agent_start");
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1100);
-	expect(nudgeMessages(rt)).toHaveLength(1); // 恢复催促：先发决策回合
-	await rt.settleAfterRun(); // 决策回合结束 → 发继续消息
-	expect(rt.sentMessages.at(-1)).toBe(nudge("扩展来源"));
+	expect(nudgeMessages(rt)).toHaveLength(1); // nudges resume: decision turn first
+	await rt.settleAfterRun(); // decision turn ends → continue message
+	expect(rt.sentMessages.at(-1)).toBe(nudge("extension source"));
 
 	await rt.settleAfterRun();
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });
 
-it("决策回合被 ESC 中止 → 不发继续消息，卡片记为 superseded，本次空闲不再催促", async () => {
+it("ESC on the decision turn → no continue message, the card says superseded, and no nudge this idle spell", async () => {
 	const rt = await setup();
 	const states: any[] = [];
 	rt.pi.events.on("watchdog:state", (s: unknown) => states.push(s));
 
-	await rt.commands.get("watchdog").handler("timeout=1 message=决策中止", rt.ctx);
+	await rt.commands.get("watchdog").handler("timeout=1 message=decision abort", rt.ctx);
 	await rt.settleAfterRun();
-	await vi.advanceTimersByTimeAsync(1100); // 倒计时归零 → 发决策消息，decisionWindow 打开
+	await vi.advanceTimersByTimeAsync(1100); // countdown hit zero → decision message sent, decisionWindow opens
 	expect(nudgeMessages(rt)).toHaveLength(1);
 
-	await rt.settleAbortedTurn(); // 用户按 ESC 中止决策回合
+	await rt.settleAbortedTurn(); // user pressed ESC to stop the decision turn
 
-	// 修复前这里会被判成「还有活 → 继续」发出 continuation，触发新一轮
+	// aborted decision turn sends no continuation, or it would start a new run
 	expect(continuationMessages(rt)).toHaveLength(0);
 	expect(states.at(-1)).toMatchObject({ running: true, interrupted: true });
 
 	const cards = rt.entries.filter((e) => e.customType === DECISION_ENTRY_TYPE).map((e) => e.data as any);
 	expect(cards.at(-1)).toMatchObject({ outcome: "superseded" });
 
-	// interrupted 让本次空闲不再倒计时/催促
+	// interrupted means no countdown or nudge this idle spell
 	await vi.advanceTimersByTimeAsync(5000);
 	expect(nudgeMessages(rt)).toHaveLength(1);
 	expect(rt.statusBars.get("watchdog")).toContain("⏹");
@@ -141,40 +141,40 @@ it("决策回合被 ESC 中止 → 不发继续消息，卡片记为 superseded�
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });
 
-it("决策回合内插话后又按 ESC → 提示插话可能未被处理，且不发继续消息", async () => {
+it("ESC after a user interjection during the decision turn → warns the interjection may be lost, and sends no continue message", async () => {
 	const rt = await setup();
-	await rt.commands.get("watchdog").handler("timeout=1 message=插话中止", rt.ctx);
+	await rt.commands.get("watchdog").handler("timeout=1 message=interject abort", rt.ctx);
 	await rt.settleAfterRun();
-	await vi.advanceTimersByTimeAsync(1100); // decisionWindow 打开
+	await vi.advanceTimersByTimeAsync(1100); // decisionWindow opens
 
 	rt.notifications.length = 0;
-	// 中止的 run 里混入一条真实 user 消息（决策提示词是 role:"custom"，不算）
+	// the aborted run contains a real user message (the decision prompt is role:"custom", so it does not count)
 	await rt.emit("agent_end", {
 		messages: [
-			{ role: "user", content: "插话内容" },
+			{ role: "user", content: "interjection" },
 			{ role: "assistant", content: [], stopReason: "aborted" },
 		],
 	});
 	rt.state.idle = true;
 	await rt.emit("agent_settled");
 
-	expect(rt.notifications.some((n) => n.msg.includes("可能未被处理"))).toBe(true);
+	expect(rt.notifications.some((n) => n.msg.includes("may have been dropped"))).toBe(true);
 	expect(continuationMessages(rt)).toHaveLength(0);
 
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });
 
-it("stop_watchdog 自己触发的 abort 不会被当成用户 ESC 打断", async () => {
+it("the abort from stop_watchdog itself is not treated as a user ESC stop", async () => {
 	const rt = await setup();
-	await rt.commands.get("watchdog").handler("timeout=60 message=自停测试", rt.ctx);
+	await rt.commands.get("watchdog").handler("timeout=60 message=self-stop test", rt.ctx);
 	await rt.settleAfterRun();
 
-	// 工具内部 teardown 先于 abort：stop_watchdog 之后 running=false
+	// teardown runs before the abort inside the tool: after stop_watchdog, running=false
 	await rt.tools.get("stop_watchdog").execute("t1", {}, undefined, undefined, rt.ctx);
-	await rt.settleAbortedTurn(); // 工具 abort 触发的 agent_end
+	await rt.settleAbortedTurn(); // the agent_end triggered by the tool's abort
 
 	rt.notifications.length = 0;
 	await rt.commands.get("watchdog").handler("status", rt.ctx);
-	expect(rt.notifications.some((n) => n.msg.includes("未在运行"))).toBe(true);
-	expect(rt.statusBars.get("watchdog")).toBeUndefined(); // 状态栏已清空，未残留「已打断」
+	expect(rt.notifications.some((n) => n.msg.includes("not running"))).toBe(true);
+	expect(rt.statusBars.get("watchdog")).toBeUndefined(); // status bar cleared, no leftover "stopped" mark
 });
