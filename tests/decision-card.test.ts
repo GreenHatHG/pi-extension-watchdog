@@ -113,6 +113,10 @@ it("the nudge message renders as a collapsed hint and shows the prompt only when
 	expect(expanded).toContain("Watchdog check");
 });
 
+it("the decision prompt names stop_watchdog as the only allowed tool, so it does not contradict itself", () => {
+	expect(DECISION_MESSAGE).toContain("every tool except stop_watchdog is blocked");
+});
+
 it("in fullscreen the hint expands on click and collapses on a second click", async () => {
 	const rt = await setup();
 	const renderer = rt.messageRenderers.get(DECISION_MESSAGE_TYPE);

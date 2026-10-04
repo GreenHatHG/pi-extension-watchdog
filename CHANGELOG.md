@@ -26,6 +26,7 @@
 
 ### 修复
 
+- **决策提示不再自相矛盾**：原文写着「本回合不要用工具」，紧接着又要求「以 `stop_watchdog` 收尾」。现在提示词与拦截原因都改成「除 `stop_watchdog` 外的工具都被拦截」，与 `onToolCall` 的实际放行名单一致。
 - **会话替换（`/clear`、`/resume`、`/fork`）后不再触碰失效的旧 ctx**：`startWatchdog` 现在把新会话的 `ctx` 传给 `teardown`，`session_shutdown` 也会清空缓存的 `activeCtx`，修掉 `This extension ctx is stale after session replacement` 报错。
 - **决策回合被 `Esc` 中止时不再误判为「还有活 → 继续」**：中止发生在决策窗口内时按 `superseded` 收口（不发继续消息、整段交换折叠），并在中止的回合里夹有真实用户消息时提示「插话可能未被处理，请重发」。
 

@@ -199,7 +199,7 @@ it("inside the decision window every tool but stop_watchdog is blocked; after se
 
 	const blocked = await rt.emitToolCall({ toolName: "bash", toolCallId: "c1", input: {} });
 	expect(blocked?.block).toBe(true);
-	expect(blocked?.reason).toContain("tools are blocked");
+	expect(blocked?.reason).toContain("every tool except stop_watchdog is blocked");
 
 	const allowed = await rt.emitToolCall({ toolName: "stop_watchdog", toolCallId: "cs", input: {} });
 	expect(allowed).toBeUndefined();

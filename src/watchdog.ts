@@ -175,7 +175,7 @@ function onToolCall(event: ToolCallEvent): ToolCallEventResult | undefined {
 	return {
 		block: true,
 		reason:
-			"Watchdog decision turn: tools are blocked. Reply with a brief acknowledgement if work remains; " +
+			"Watchdog decision turn: every tool except stop_watchdog is blocked. Reply with a brief acknowledgement if work remains; " +
 			"otherwise call stop_watchdog.",
 	};
 }

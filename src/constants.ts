@@ -15,7 +15,7 @@ export function continuationText(hint?: string): string {
  * Decision-turn prompt and fold start; the turn only allows text or stop_watchdog, so it folds as one clean block.
  */
 export const DECISION_MESSAGE =
-	"[Automated, not user input] Watchdog check — do not use tools in this turn. " +
+	"[Automated, not user input] Watchdog check — every tool except stop_watchdog is blocked in this turn. " +
 	"Reply with a brief acknowledgement if work remains. If no work remains, or you are waiting on a " +
 	"user decision, call stop_watchdog as your final action.";
 
