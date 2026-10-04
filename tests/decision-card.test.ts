@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { DECISION_ENTRY_TYPE } from "../src/constants.ts";
+import { DECISION_ENTRY_TYPE, DECISION_MESSAGE, DECISION_MESSAGE_TYPE } from "../src/constants.ts";
 import type { DecisionCardData } from "../src/decision-card.ts";
-import { setup } from "./helpers/setup.js";
+import { nudgeMessages, setup } from "./helpers/setup.js";
 
 beforeEach(() => {
 	vi.useFakeTimers();
@@ -27,6 +27,9 @@ it("outcome continue drops one card with the AI reply", async () => {
 	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx);
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1100); // decision turn
+
+	// The check hint is the visible nudge message; the result entry is a hidden history record.
+	expect(nudgeMessages(rt)[0]?.display).toBe(true);
 
 	await rt.emitMessageEnd({ role: "assistant", content: [{ type: "text", text: "still working on it" }] });
 	await rt.settleAfterRun(); // settle → continue
@@ -91,42 +94,30 @@ it("a very long AI reply is cut to the cap before saving", async () => {
 	expect(found[0].reply).toBe(long.slice(0, 300));
 });
 
-it("decision card renderer: a grey hint when folded, the full reply when expanded", async () => {
+it("the saved result card has no TUI renderer, so the timeline stays quiet", async () => {
 	const rt = await setup();
-	const renderer = rt.entryRenderers.get(DECISION_ENTRY_TYPE);
-	expect(renderer).toBeTypeOf("function");
-
-	const data: DecisionCardData = {
-		exchangeId: "w1",
-		outcome: "continue",
-		reply: "still working on it",
-		nudgeCount: 2,
-		maxNudges: 50,
-		ts: Date.now(),
-	};
-	const entry = { customType: DECISION_ENTRY_TYPE, data };
-	const collapsed = renderer!(entry, { expanded: false }, theme).render(80).join("\n");
-	expect(collapsed).toContain("Work left → continue");
-	expect(collapsed).toContain("2/50");
-	expect(collapsed).toContain("reply folded");
-	expect(collapsed).not.toContain("still working on it");
-
-	const expanded = renderer!(entry, { expanded: true }, theme).render(80).join("\n");
-	expect(expanded).toContain("still working on it");
+	expect(rt.entryRenderers.get(DECISION_ENTRY_TYPE)).toBeUndefined();
 });
 
-it("in fullscreen the card expands on click and collapses on a second click", async () => {
+it("the nudge message renders as a collapsed hint and shows the prompt only when expanded", async () => {
 	const rt = await setup();
-	const renderer = rt.entryRenderers.get(DECISION_ENTRY_TYPE);
-	const data: DecisionCardData = {
-		exchangeId: "click-1",
-		outcome: "continue",
-		reply: "still working on it",
-		nudgeCount: 1,
-		maxNudges: 50,
-		ts: Date.now(),
-	};
-	const view = renderer!({ customType: DECISION_ENTRY_TYPE, data }, { expanded: false }, theme);
+	const renderer = rt.messageRenderers.get(DECISION_MESSAGE_TYPE);
+	expect(renderer).toBeTypeOf("function");
+
+	const message = { customType: DECISION_MESSAGE_TYPE, content: DECISION_MESSAGE, details: { exchangeId: "w1" } };
+	const collapsed = renderer!(message, { expanded: false }, theme).render(80).join("\n");
+	expect(collapsed).toContain("Sending decision message");
+	expect(collapsed).not.toContain("Watchdog check");
+
+	const expanded = renderer!(message, { expanded: true }, theme).render(80).join("\n");
+	expect(expanded).toContain("Watchdog check");
+});
+
+it("in fullscreen the hint expands on click and collapses on a second click", async () => {
+	const rt = await setup();
+	const renderer = rt.messageRenderers.get(DECISION_MESSAGE_TYPE);
+	const message = { customType: DECISION_MESSAGE_TYPE, content: DECISION_MESSAGE, details: { exchangeId: "click-1" } };
+	const view = renderer!(message, { expanded: false }, theme);
 	const clickLeft = {
 		type: "click",
 		button: "left",
@@ -141,14 +132,15 @@ it("in fullscreen the card expands on click and collapses on a second click", as
 		ctrl: false,
 	};
 
-	expect(view.render(80).join("\n")).toContain("reply folded");
+	expect(view.render(80).join("\n")).toContain("Sending decision message");
+	expect(view.render(80).join("\n")).not.toContain("Watchdog check");
 	view.handleMouse(clickLeft);
-	expect(view.render(80).join("\n")).toContain("still working on it");
+	expect(view.render(80).join("\n")).toContain("Watchdog check");
 	view.handleMouse(clickLeft);
-	expect(view.render(80).join("\n")).toContain("reply folded");
+	expect(view.render(80).join("\n")).not.toContain("Watchdog check");
 });
 
-it("a keep-mode stop card records the paused state and renders the keep-mode paused text", async () => {
+it("a keep-mode stop still records the paused state in history", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1 mode=keep", rt.ctx);
 	await rt.settleAfterRun();
@@ -158,12 +150,6 @@ it("a keep-mode stop card records the paused state and renders the keep-mode pau
 
 	const found = cards(rt);
 	expect(found[0]).toMatchObject({ outcome: "stop", suspended: true });
-
-	const renderer = rt.entryRenderers.get(DECISION_ENTRY_TYPE);
-	const line = renderer!({ customType: DECISION_ENTRY_TYPE, data: found[0] }, { expanded: false }, theme)
-		.render(120)
-		.join("\n");
-	expect(line).toContain("keep mode paused");
 });
 
 it("a once-mode stop card has no paused state", async () => {

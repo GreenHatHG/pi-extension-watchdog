@@ -19,6 +19,8 @@ export function createMockRuntime() {
 	const entries: { customType: string; data: any }[] = [];
 	// Renderers from registerEntryRenderer, used by decision-card render checks.
 	const entryRenderers = new Map<string, (entry: any, options: any, theme: any) => any>();
+	// Renderers from registerMessageRenderer, used by the nudge-hint render checks.
+	const messageRenderers = new Map<string, (message: any, options: any, theme: any) => any>();
 	let abortedTurns = 0;
 	const notifications: { msg: string; kind: string }[] = [];
 	const sessionEntries: any[] = [{ type: "message" }]; // A non-empty session by default; tests that need a fresh session clear this.
@@ -89,7 +91,7 @@ export function createMockRuntime() {
 			activeTools.add(tool.name); // Like real pi: a registered tool joins the active set.
 		},
 		registerCommand: (name: string, def: any) => commands.set(name, def),
-		registerMessageRenderer: () => {},
+		registerMessageRenderer: (customType: string, renderer: any) => messageRenderers.set(customType, renderer),
 		registerEntryRenderer: (customType: string, renderer: any) => entryRenderers.set(customType, renderer),
 		appendEntry: (customType: string, data?: unknown) => {
 			entries.push({ customType, data });
@@ -246,6 +248,7 @@ export function createMockRuntime() {
 		customMessages,
 		entries,
 		entryRenderers,
+		messageRenderers,
 		notifications,
 		statusBars,
 		sessionEntries,

@@ -29,7 +29,7 @@ import {
 	STATUS_KEY,
 	TOOL_NAME,
 } from "./constants.ts";
-import { type DecisionCardData, registerDecisionCardRenderer } from "./decision-card.ts";
+import { type DecisionCardData, registerDecisionHintRenderer } from "./decision-card.ts";
 import { registerWatchdogContextFolding } from "./fold.ts";
 import { MODE_POLICY, modeFromKeepAlive, type WatchdogMode } from "./mode.ts";
 import { isRecord, isRestoredReason, textFromContent } from "./utils.ts";
@@ -101,8 +101,8 @@ let stopAbortPending = false;
 export default function (extensionApi: ExtensionAPI) {
 	pi = extensionApi;
 
-	// Must run now, not at start: resuming a session replays saved cards, and a missing renderer drops them.
-	registerDecisionCardRenderer(pi);
+	// Must run now, not at start: resuming a session replays saved nudge messages, and a missing renderer would show their raw text.
+	registerDecisionHintRenderer(pi);
 
 	// ---- Every hook we listen to, in lifecycle order. ----
 
@@ -271,7 +271,7 @@ async function onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext) 
 				{ triggerTurn: true, deliverAs: "followUp" },
 			);
 		}
-		// Decision card: TUI only, showing the result and the AI reply. Written after sendMessage so it sits near the continue message.
+		// History record only: the result card has no TUI renderer, since the nudge hint already marks the check.
 		pi.appendEntry<DecisionCardData>(DECISION_ENTRY_TYPE, {
 			exchangeId: window.exchangeId,
 			outcome,
@@ -565,12 +565,12 @@ async function fireNudge(ctx: ExtensionContext) {
 	try {
 		const exchangeId = createExchangeId();
 		decisionWindow = { exchangeId, stopCalled: false };
-		// display:false keeps this out of the TUI history; details.exchangeId lets the context hook find this exchange.
+		// display:true shows the collapsed check hint; details.exchangeId lets the context hook and the hint renderer find this exchange.
 		pi.sendMessage(
 			{
 				customType: DECISION_MESSAGE_TYPE,
 				content: DECISION_MESSAGE,
-				display: false,
+				display: true,
 				details: { exchangeId },
 			},
 			{ triggerTurn: true, deliverAs: "steer" },

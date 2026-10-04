@@ -52,6 +52,17 @@ it("a continue exchange folds down to just the continue message", () => {
 	expect(foldWatchdogContext(messages)).toEqual([user("task"), continuationMsg(), user("later")]);
 });
 
+it("a display:true nudge still folds (its visibility is TUI-only)", () => {
+	const messages = [
+		user("task"),
+		{ ...nudgeMsg(), display: true },
+		assistant([{ type: "text", text: "ok" }]),
+		continuationMsg(),
+		user("later"),
+	];
+	expect(foldWatchdogContext(messages)).toEqual([user("task"), continuationMsg(), user("later")]);
+});
+
 it("a stop exchange is dropped together with the blocked tool pair", () => {
 	const messages = [
 		user("task"),

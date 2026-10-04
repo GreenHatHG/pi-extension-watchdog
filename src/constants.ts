@@ -25,16 +25,17 @@ export const ACTIVITY_GRACE_MS = 2000;
 export const TOOL_NAME = "stop_watchdog";
 
 /**
- * Decision message: hidden, carries exchangeId for folding; do not change its string value, saved sessions depend on it.
+ * Decision message: shown as the collapsed check hint in the TUI (click to expand the prompt),
+ * carries exchangeId for folding; do not change its string value, saved sessions depend on it.
  */
 export const DECISION_MESSAGE_TYPE = "pi-watchdog:nudge";
 /** Continue message: sent on "continue", starts the real work turn and ends the fold range. */
 export const CONTINUATION_MESSAGE_TYPE = "pi-watchdog:continuation";
 /** Stop marker: written on "stop" so folding can drop the whole decision exchange. */
 export const FOLD_MESSAGE_TYPE = "pi-watchdog:fold";
-/** Decision card: TUI-only entry (no context, no folding) that shows one check's result and the AI reply. */
+/** Decision result: session-history record only (no TUI renderer, no context). */
 export const DECISION_ENTRY_TYPE = "pi-watchdog:decision";
-/** Max reply chars kept on the card, to keep session files small but still readable. */
+/** Max reply chars kept in the history record, to keep session files small but still readable. */
 export const DECISION_REPLY_MAX_CHARS = 300;
 
 export const STATUS_KEY = "watchdog";
