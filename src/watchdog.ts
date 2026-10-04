@@ -31,6 +31,7 @@ import {
 } from "./constants.ts";
 import { type DecisionCardData, registerDecisionCardRenderer } from "./decision-card.ts";
 import { registerWatchdogContextFolding } from "./fold.ts";
+import { MODE_POLICY, modeFromKeepAlive, type WatchdogMode } from "./mode.ts";
 import { isRecord, isRestoredReason, textFromContent } from "./utils.ts";
 
 /** One decision exchange: from the nudge we send until that turn settles. */
@@ -44,8 +45,8 @@ interface DecisionWindow {
 
 interface WatchdogState {
 	running: boolean;
-	/** Keep mode: after a stop we only pause, and the next user message wakes us. */
-	keepAlive: boolean;
+	/** Mode: once shuts down on stop_watchdog; keep only pauses, and the next user message wakes us. */
+	mode: WatchdogMode;
 	/** Paused in keep mode; a new user message resumes us. */
 	suspended: boolean;
 	timeoutMs: number;
@@ -70,7 +71,7 @@ interface WatchdogState {
 let pi: ExtensionAPI;
 const state: WatchdogState = {
 	running: false,
-	keepAlive: false,
+	mode: "once",
 	suspended: false,
 	timeoutMs: DEFAULT_TIMEOUT_SECONDS * 1000,
 	message: "", // Extra instruction only; continuationText glues on the fixed trigger line.
@@ -275,7 +276,7 @@ async function onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext) 
 			exchangeId: window.exchangeId,
 			outcome,
 			reply: window.replyText,
-			suspended: outcome === "stop" && state.keepAlive,
+			suspended: outcome === "stop" && state.suspended,
 			nudgeCount: state.nudgeCount,
 			maxNudges: state.maxNudges,
 			ts: Date.now(),
@@ -293,7 +294,7 @@ function onInput(event: InputEvent, ctx: ExtensionContext) {
 		state.interrupted = false; // User is back, so nudging can resume.
 		publishState();
 	}
-	if (state.keepAlive && state.suspended && !state.running) {
+	if (state.suspended && !state.running && MODE_POLICY[state.mode].resumesOnUserMessage) {
 		resumeWatchdog(ctx);
 	}
 }
@@ -315,7 +316,7 @@ function publishState() {
 	pi.events.emit("watchdog:state", {
 		running: state.running,
 		suspended: state.suspended,
-		keepAlive: state.keepAlive,
+		keepAlive: state.mode === "keep",
 		countdownArmed: state.countdownDeadline != null,
 		paused: state.pausedByInput || state.pausedByActivity,
 		interrupted: state.interrupted,
@@ -381,7 +382,7 @@ function renderStatus(ctx: ExtensionContext) {
  */
 function teardown(ctx?: ExtensionContext, force = true, publish = true) {
 	// Keep mode + soft stop = nap, not death; the next real user message wakes us up.
-	const suspend = state.keepAlive && !force && state.running;
+	const suspend = !force && state.running && MODE_POLICY[state.mode].sleepsOnAiStop;
 	state.running = false;
 	state.suspended = suspend;
 	state.pausedByInput = false;
@@ -501,7 +502,7 @@ async function fireNudge(ctx: ExtensionContext) {
 
 	state.nudgeCount++;
 	if (state.nudgeCount > state.maxNudges) {
-		state.keepAlive = false; // Hit the cap, so the run is stuck; stop even in keep mode.
+		state.mode = "once"; // Hit the cap, so the run is stuck; stop even in keep mode.
 		teardown(ctx);
 		ctx.ui.notify(`watchdog: nudged ${state.maxNudges} times with no progress, auto-stopped`, "warning");
 		return;
@@ -549,7 +550,7 @@ function startWatchdog(
 	// Pass the current ctx: after session replacement activeCtx is the stale previous-session context.
 	// Restarting: stop hard, and don't tell others we stopped (the run keeps going).
 	teardown(ctx, true, false);
-	state.keepAlive = keepAlive;
+	state.mode = modeFromKeepAlive(keepAlive);
 	state.running = true;
 	state.timeoutMs = timeoutSeconds * 1000;
 	state.message = message;
@@ -575,7 +576,7 @@ function startWatchdog(
 	}
 
 	ctx.ui.notify(
-		`watchdog: monitoring started (${keepAlive ? "keep mode, " : ""}nudge after ${timeoutSeconds}s idle, up to ${state.maxNudges} times)`,
+		`watchdog: monitoring started (${MODE_POLICY[state.mode].startNotice}nudge after ${timeoutSeconds}s idle, up to ${state.maxNudges} times)`,
 		"info",
 	);
 	publishState();
@@ -702,7 +703,7 @@ function registerWatchdogCommand() {
 			switch (first) {
 				case "stop": {
 					if (state.suspended && !state.running) {
-						state.keepAlive = false;
+						state.mode = "once";
 						teardown(ctx);
 						ctx.ui.notify("watchdog: keep-mode monitoring fully off", "info");
 						break;
@@ -712,7 +713,7 @@ function registerWatchdogCommand() {
 						break;
 					}
 					// stop always fully stops; pausing is only done by the AI calling stop_watchdog in keep mode.
-					state.keepAlive = false;
+					state.mode = "once";
 					teardown(ctx);
 					ctx.ui.notify("watchdog: monitoring stopped", "info");
 					break;
