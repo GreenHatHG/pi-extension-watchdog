@@ -42,6 +42,10 @@ interface DecisionWindow {
 	replyText?: string;
 	/** User hit ESC during the decision turn: close it as superseded, don't continue. */
 	aborted?: boolean;
+	/** The provider request that carried this check failed, so the check never got an answer. */
+	failed?: boolean;
+	/** Provider error text from that failure, kept for the history card. */
+	failureMessage?: string;
 }
 
 interface WatchdogState {
@@ -190,6 +194,13 @@ function onToolCall(event: ToolCallEvent): ToolCallEventResult | undefined {
 
 /** A run ended: flag a user stop (ESC or another extension's abort) from the "aborted" stopReason; stop_watchdog sets running=false first, so we skip it. */
 function onAgentEnd(event: AgentEndEvent, ctx: ExtensionContext) {
+	if (state.running && decisionWindow !== null && !stopAbortPending) {
+		// Pi may retry a run internally, so read the newest decision from every agent_end; the
+		// final one before agent_settled decides whether the check really failed.
+		const error = runError(event.messages);
+		decisionWindow.failed = error !== undefined;
+		decisionWindow.failureMessage = error;
+	}
 	if (!state.running || !runWasAborted(event.messages)) return;
 	state.interrupted = true;
 	if (decisionWindow !== null) {
@@ -252,8 +263,17 @@ async function onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext) 
 		// A decision turn is void (superseded) when the user jumped in, the turn isn't idle, or ESC hit.
 		// We must still drop a terminal marker, or the "keep until a marker" rule makes the decision prompt stick forever.
 		const superseded = !ctx.isIdle() || ctx.hasPendingMessages() || window.aborted === true;
-		const outcome: DecisionCardData["outcome"] = window.stopCalled ? "stop" : superseded ? "superseded" : "continue";
-		if (window.stopCalled || superseded) {
+		// A check that died on a provider error never answered: retry it as a fresh check. That spends
+		// one nudge from the same max= budget as any other check (sendDecision caps and auto-stops).
+		const retry = state.running && window.failed === true && !window.stopCalled && !superseded;
+		const outcome: DecisionCardData["outcome"] = window.stopCalled
+			? "stop"
+			: superseded
+				? "superseded"
+				: window.failed === true
+					? "failed"
+					: "continue";
+		if (window.stopCalled || superseded || retry) {
 			pi.sendMessage(
 				{
 					customType: FOLD_MESSAGE_TYPE,
@@ -281,16 +301,22 @@ async function onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext) 
 		}
 		// History record only: it gets a TUI renderer and stays for reading back, but never enters the model context.
 		// One entry per exchange, holding whatever the turn said. A stop leaves no reply, since the reply is cleared
-		// before it is saved and the wrap-up text ran before the tool call.
+		// before it is saved and the wrap-up text ran before the tool call. A failed check keeps the provider error.
 		pi.appendEntry<DecisionCardData>(DECISION_ENTRY_TYPE, {
 			exchangeId: window.exchangeId,
 			outcome,
-			reply: window.replyText,
+			reply: window.replyText ?? (window.failureMessage || undefined),
 			suspended: outcome === "stop" && state.suspended,
 			nudgeCount: state.nudgeCount,
 			maxNudges: state.maxNudges,
 			ts: Date.now(),
 		});
+		if (retry) {
+			// Fresh check is on its way; no countdown, since the AI is running again.
+			// If sendDecision hit the cap it tore monitoring down, so don't read the status bar afterwards.
+			sendDecision(ctx);
+			return;
+		}
 	}
 	if (!state.running) return;
 	activeCtx = ctx;
@@ -564,14 +590,22 @@ async function fireNudge(ctx: ExtensionContext) {
 		return;
 	}
 
+	sendDecision(ctx);
+}
+
+/**
+ * Spend one nudge on a decision check: bump the count, auto-stop at the cap, then send the decision
+ * message. The countdown and the retry after a failed check both go through here, so every check
+ * (including a retry) draws from the same `max=` budget.
+ */
+function sendDecision(ctx: ExtensionContext): boolean {
 	state.nudgeCount++;
 	if (state.nudgeCount > state.maxNudges) {
 		state.mode = "once"; // Hit the cap, so the run is stuck; stop even in keep mode.
 		teardown(ctx);
 		ctx.ui.notify(`watchdog: nudged ${state.maxNudges} times with no progress, auto-stopped`, "warning");
-		return;
+		return false;
 	}
-
 	try {
 		const exchangeId = createExchangeId();
 		decisionWindow = { exchangeId, stopCalled: false };
@@ -589,9 +623,10 @@ async function fireNudge(ctx: ExtensionContext) {
 		// Race: the AI started the moment we sent it, so don't count this nudge and wait for agent_settled.
 		decisionWindow = null;
 		state.nudgeCount--;
-		return;
+		return false;
 	}
 	renderStatus(ctx);
+	return true;
 }
 
 /** Start watching: register the tool on first use, reset settings, then arm or wait. */
@@ -660,6 +695,22 @@ function runWasAborted(messages: unknown): boolean {
 		const msg = m as { role?: unknown; stopReason?: unknown } | undefined;
 		return msg?.role === "assistant" && msg?.stopReason === "aborted";
 	});
+}
+
+/**
+ * Provider error text when the run died on one, or undefined when it ended any other way.
+ * Pi emits agent_end once per internal retry attempt, so the newest assistant message decides:
+ * a later successful attempt clears the earlier error.
+ */
+function runError(messages: unknown): string | undefined {
+	if (!Array.isArray(messages)) return undefined;
+	for (let i = messages.length - 1; i >= 0; i -= 1) {
+		const msg = messages[i] as { role?: unknown; stopReason?: unknown; errorMessage?: unknown } | undefined;
+		if (msg?.role !== "assistant") continue;
+		if (msg.stopReason !== "error") return undefined;
+		return typeof msg.errorMessage === "string" ? msg.errorMessage : "";
+	}
+	return undefined;
 }
 
 /** Does the session already have messages? Tells a brand-new session apart. */

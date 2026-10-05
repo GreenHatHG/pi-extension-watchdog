@@ -7,7 +7,8 @@
 ### 改变
 
 - **时间线上的卡片带 `watchdog:` 前缀**：决策提示与决策结果两类卡片都由 `⏱ watchdog: ...` 起头，和其他插件输出的卡片区分开，一眼看得出是谁发的。
-- **决策结果上屏：时间线上多一行摘要，可展开看 AI 的回复**。以前一次检查只看得见「问题」（决策提示），模型那句被剥离的回复只能去 `/tree` 或会话文件里找。现在 `pi-watchdog:decision` 记录也注册了渲染器，在提示下方显示一行 `⏱ watchdog: still working · click to expand` / `⏱ watchdog: stopped on purpose` / `⏱ watchdog: superseded`，点击展开就是那句回复；常驻模式下 AI 主动停止时多标 `· monitoring paused`。先调 `stop_watchdog` 的那次检查没有回复可看（收尾文字在工具调用之前输出，落盘时已清空），这种卡片只显示结果。两种摘要的展开状态各自记在 `src/expanded.ts`，每开新会话时清空——渲染器组件由 pi 缓存，会跨会话存活。折叠逻辑不变：它仍是 `CustomEntry`，不进模型上下文。
+- **检查失败自动重试，并计入 `max` 次数**：决策检查本身撞上 provider 错误（网络抖动、限流、超时）时，以前只会按 `superseded` 记录一张卡片，然后老实等下一次空闲倒计时——白等一个 timeout。现在失败会当场补发一条新检查（不等倒计时），并把这次重试当成一次正常催促计入 `max` 预算，所以连续失败也会在 `max` 次后按「催不动」自动停下，不会绕过卡死保险。判定放在 `agent_settled`（那时才确定没有内部重试会救回来），`agent_end` 只把最新一次尝试的结果记进决策窗口；`stop_watchdog` 主动中止留下的幻影 `stopReason: "error"` 消息被排除在外。失败那张卡片新增 `failed` 结果（`⏱ watchdog: check failed, retrying`），展开可见 provider 的报错原文。
+- **决策结果上屏：时间线上多一行摘要，可展开看 AI 的回复**。以前一次检查只看得见「问题」（决策提示），模型那句被剥离的回复只能去 `/tree` 或会话文件里找。现在 `pi-watchdog:decision` 记录也注册了渲染器，在提示下方显示一行 `⏱ watchdog: still working · click to expand` / `⏱ watchdog: stopped on purpose` / `⏱ watchdog: superseded` / `⏱ watchdog: check failed, retrying`，点击展开就是那句回复；常驻模式下 AI 主动停止时多标 `· monitoring paused`。先调 `stop_watchdog` 的那次检查没有回复可看（收尾文字在工具调用之前输出，落盘时已清空），这种卡片只显示结果。两种摘要的展开状态各自记在 `src/expanded.ts`，每开新会话时清空——渲染器组件由 pi 缓存，会跨会话存活。折叠逻辑不变：它仍是 `CustomEntry`，不进模型上下文。
 - **TUI 去噪：检查不再发通知，结果和提示各占一行折叠摘要**。发起检查时不再发 `ui.notify`（info 通知在 pi 里是永久时间线行），改由决策消息本身在时间线里显示一行 `⏱ watchdog: Sending decision message · click to expand`（展开看发给模型的提示全文）；`stop_watchdog` 的调用/结果行被隐藏（`renderShell: "self"` + 空 `renderCall`/`renderResult`）；`ctx.abort()` 产生的幻影 `Error: This operation was aborted` 消息在本插件主动中止后（决策窗口内与窗口外）都被清成空消息。决策结果写进会话历史；常驻模式下的「挂起 vs 已停止」记为 `suspended` 字段。
 - **`stop_watchdog` 支持主动调用**：AI 真正完工（或在等用户决策）时，不必等倒计时归零，可在工作回合末尾直接调用它收尾，省掉一次「干等 timeout + 空决策往返」；普通模式彻底停止，`mode=keep` 下挂起。工具 description 与「未运行」提示文案随之改写，abort 幻影消息的清理也扩展到决策窗口外（仅限本插件刚触发的 abort，真实 provider 错误照常显示）。
 - **催促拆成「决策回合 + 继续消息」**：空闲超时后先发一条禁止干活的决策消息（除 `stop_watchdog` 外的工具被拦截），AI 回文字 = 还有活，watchdog 随即发继续消息触发真正的工作回合；AI 调 `stop_watchdog` = 停止。
@@ -19,7 +20,8 @@
 
 ### 新增
 
-- 决策结果记录（`pi-watchdog:decision`）：每次决策检查结算后写一张 `appendEntry`，记下结果（继续 / AI 主动停止 / 用户接管作废）、挂起状态与截断 300 字的 AI 回复。它不注册 TUI 渲染器（不在时间线出现），不进模型上下文、不参与折叠，`/resume` 后仍可从 `/tree` 或会话文件读到。
+- 决策结果记录（`pi-watchdog:decision`）：每次决策检查结算后写一张 `appendEntry`，记下结果（继续 / AI 主动停止 / 用户接管作废 / 检查失败）、挂起状态与截断 300 字的 AI 回复（失败时存 provider 报错原文）。它不注册 TUI 渲染器（不在时间线出现），不进模型上下文、不参与折叠，`/resume` 后仍可从 `/tree` 或会话文件读到。
+- 决策重试回归测试（`tests/decision-retry.test.ts`）：失败后立刻补发、重试计入 `max`、用户接管不重试、pi 内部重试救回后照常继续、`stop_watchdog` 幻影错误不误判，共 5 例。
 - `pi.on("context")` 折叠钩子与 `foldWatchdogContext` 纯函数（跨 resume/reload 成立，关联不完整时 fail closed）。
 - 多会话共存回归测试（`tests/session-reuse.test.ts`）：同一进程里连开两个会话，两个都必须拿到 `stop_watchdog`。现有用例每条都 `vi.resetModules()`，只覆盖「模块首次加载」，所以漏掉了这个缺陷。
 - 决策消息改为带 `exchangeId` 的 CustomMessage（`pi-watchdog:nudge` / `:continuation` / `:fold`），折叠关联只靠消息自身的 `customType` + `exchangeId`，不依赖额外落盘信息。
