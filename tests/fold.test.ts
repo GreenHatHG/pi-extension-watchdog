@@ -5,6 +5,7 @@ import {
 	DECISION_MESSAGE_TYPE,
 	FOLD_MESSAGE_TYPE,
 	continuationText as nudge,
+	STOP_MESSAGE_TYPE,
 } from "../src/constants.ts";
 import { foldWatchdogContext } from "../src/fold.ts";
 import { continuationMessages, nudgeMessages, setup } from "./helpers/setup.js";
@@ -25,12 +26,19 @@ const continuationMsg = (exchangeId = EXCHANGE) => ({
 	display: true,
 	details: { exchangeId },
 });
-const stopMarker = (exchangeId = EXCHANGE) => ({
+const stopMarker = (exchangeId = EXCHANGE, toolCallId = "cs") => ({
+	role: "custom",
+	customType: STOP_MESSAGE_TYPE,
+	content: "",
+	display: false,
+	details: { exchangeId, toolCallId },
+});
+const foldMarker = (exchangeId = EXCHANGE, outcome = "stop") => ({
 	role: "custom",
 	customType: FOLD_MESSAGE_TYPE,
 	content: "",
 	display: false,
-	details: { exchangeId, outcome: "stop" },
+	details: { exchangeId, outcome },
 });
 const assistant = (content: unknown[]) => ({ role: "assistant", content });
 const toolResult = (toolCallId: string, toolName: string) => ({
@@ -74,7 +82,7 @@ it("a stop exchange is dropped together with the blocked tool pair", () => {
 		]),
 		toolResult("c1", "edit"),
 		toolResult("cs", "stop_watchdog"),
-		stopMarker(),
+		foldMarker(),
 	];
 	expect(foldWatchdogContext(messages)).toEqual([user("task")]);
 });
@@ -105,7 +113,7 @@ it("multiple exchanges fold independently", () => {
 		continuationMsg("e1"),
 		nudgeMsg("e2"),
 		assistant([]),
-		stopMarker("e2"),
+		foldMarker("e2"),
 		user("after"),
 	];
 	expect(foldWatchdogContext(messages)).toEqual([continuationMsg("e1"), user("after")]);
@@ -159,6 +167,50 @@ it("plain messages with no link are untouched", () => {
 	expect(foldWatchdogContext(messages)).toEqual(messages);
 });
 
+it("a proactive stop folds the run that ended at its marker, and keeps what came before and after", () => {
+	const messages = [
+		user("task"),
+		assistant([
+			{ type: "toolCall", id: "c1", name: "edit", arguments: {} },
+			{ type: "toolCall", id: "cs", name: "stop_watchdog", arguments: {} },
+		]),
+		toolResult("c1", "edit"),
+		toolResult("cs", "stop_watchdog"),
+		stopMarker("w1", "cs"),
+		user("next thing"),
+	];
+	expect(foldWatchdogContext(messages)).toEqual([user("task"), user("next thing")]);
+});
+
+it("a proactive stop keeps the wrap-up text the AI wrote after the tool call out of the view", () => {
+	const messages = [
+		user("task"),
+		assistant([
+			{ type: "text", text: "starting" },
+			{ type: "toolCall", id: "cs", name: "stop_watchdog", arguments: {} },
+		]),
+		toolResult("cs", "stop_watchdog"),
+		{ role: "assistant", content: [{ type: "text", text: "all done, here is the summary" }], stopReason: "aborted" },
+		stopMarker("w1", "cs"),
+	];
+	expect(foldWatchdogContext(messages)).toEqual([user("task")]);
+});
+
+it("a proactive stop whose tool call is gone (compacted) fails closed and keeps its rows", () => {
+	const messages = [user("task"), toolResult("cs", "stop_watchdog"), stopMarker("w1", "cs")];
+	expect(foldWatchdogContext(messages)).toEqual(messages);
+});
+
+it("a stop marker without a tool call id is ignored, not guessed at", () => {
+	const messages = [
+		user("task"),
+		assistant([{ type: "toolCall", id: "cs", name: "stop_watchdog", arguments: {} }]),
+		toolResult("cs", "stop_watchdog"),
+		{ role: "custom", customType: STOP_MESSAGE_TYPE, content: "", display: false, details: { exchangeId: "w1" } },
+	];
+	expect(foldWatchdogContext(messages)).toEqual(messages);
+});
+
 beforeEach(() => {
 	vi.useFakeTimers();
 	vi.resetModules();
@@ -189,6 +241,31 @@ it("context hook: after the AI calls stop_watchdog the whole decision exchange i
 
 	const folded = (await rt.emitContext(rt.currentMessages())) as any[];
 	expect(folded.filter((m) => m.role === "custom")).toHaveLength(0);
+});
+
+it("context hook: a proactive stop takes its own wrap-up out of the request view", async () => {
+	const rt = await setup();
+	rt.pushMessage({ role: "user", content: "do the thing" } as any);
+	await rt.commands.get("watchdog").handler("timeout=60 message=proactive fold", rt.ctx);
+	rt.state.idle = false; // mid-run: no check turn
+
+	// The AI says it is done and calls the tool in the same message, then the turn settles.
+	// (No message_end rewrite here: outside a check turn the hook leaves the message alone.)
+	rt.pushMessage({
+		role: "assistant",
+		content: [
+			{ type: "text", text: "all done" },
+			{ type: "toolCall", id: "cs", name: "stop_watchdog", arguments: {} },
+		],
+	} as any);
+	await rt.tools.get("stop_watchdog").execute("cs", {}, undefined, undefined, rt.ctx);
+	rt.pushMessage({ role: "toolResult", toolCallId: "cs", content: [{ type: "text", text: "OK." }] });
+	await rt.settleAfterRun();
+
+	const folded = (await rt.emitContext(rt.currentMessages())) as any[];
+	expect(folded.filter((m) => m.role === "assistant" || m.role === "toolResult")).toHaveLength(0);
+	expect(folded.some((m) => m.customType === STOP_MESSAGE_TYPE)).toBe(false);
+	expect(folded.some((m) => m.role === "user")).toBe(true); // the real conversation is untouched
 });
 
 it("inside the decision window every tool but stop_watchdog is blocked; after settling they pass again", async () => {

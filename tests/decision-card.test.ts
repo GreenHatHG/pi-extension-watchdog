@@ -199,6 +199,24 @@ it("the card shows the stop outcome, a paused note in keep mode, and a reply onl
 	expect(withReply).toContain("click to expand");
 });
 
+it("a proactive stop card names the missing check instead of making one up", async () => {
+	const rt = await setup();
+	const data: DecisionCardData = {
+		exchangeId: "w1",
+		outcome: "stop",
+		proactive: true,
+		suspended: true,
+		nudgeCount: 0,
+		maxNudges: 50,
+		ts: 0,
+	};
+
+	const view = cardView(rt, data).render(80).join("\n");
+	expect(view).toContain("stopped on purpose");
+	expect(view).toContain("monitoring paused");
+	expect(view).toContain("no check"); // this stop came from no check turn, so do not imply one
+});
+
 it("clicking a card expands it, and the open state survives a rebuilt component", async () => {
 	const rt = await setup();
 	const data: DecisionCardData = {

@@ -33,6 +33,12 @@ export const DECISION_MESSAGE_TYPE = "pi-watchdog:nudge";
 export const CONTINUATION_MESSAGE_TYPE = "pi-watchdog:continuation";
 /** Stop marker: written on "stop" so folding can drop the whole decision exchange. */
 export const FOLD_MESSAGE_TYPE = "pi-watchdog:fold";
+/**
+ * Proactive stop marker: the AI called stop_watchdog outside any decision turn. Written once the run is
+ * over, it closes the fold range of that turn — the closing text and the tool round-trip would otherwise
+ * ride along in every later request. Do not change its string value, saved sessions depend on it.
+ */
+export const STOP_MESSAGE_TYPE = "pi-watchdog:stopped";
 /** Decision result: session-history record only (no TUI renderer, no context). */
 export const DECISION_ENTRY_TYPE = "pi-watchdog:decision";
 /** Max reply chars kept in the history record, to keep session files small but still readable. */

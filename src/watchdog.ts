@@ -27,6 +27,7 @@ import {
 	DEFAULT_TIMEOUT_SECONDS,
 	FOLD_MESSAGE_TYPE,
 	STATUS_KEY,
+	STOP_MESSAGE_TYPE,
 	TOOL_NAME,
 } from "./constants.ts";
 import { type DecisionCardData, registerDecisionCardRenderers } from "./decision-card.ts";
@@ -103,12 +104,30 @@ let exchangeCounter = 0;
 /** stop_watchdog is aborting the running turn; the provider may land a phantom "error" message we must clear. */
 let stopAbortPending = false;
 
+/**
+ * The proactive stop waiting to be written down: the tool ran, but the run it belongs to is not over yet.
+ * Held until then because a `pi.sendMessage` from inside a running tool only lands at turn_end, which is
+ * after the AI's wrap-up text — a marker sent from the tool would end the fold range on the wrong side.
+ */
+interface PendingProactiveStop {
+	/** Fresh each time, so the marker links back to this stop and to nothing else. */
+	exchangeId: string;
+	/** The stop_watchdog call the range hangs off; the assistant message carrying it starts the range. */
+	toolCallId: string;
+	/** Keep mode: monitoring is only suspended, and the card says so. */
+	suspended: boolean;
+	nudgeCount: number;
+}
+let pendingProactiveStop: PendingProactiveStop | null = null;
+
 export default function (extensionApi: ExtensionAPI) {
 	pi = extensionApi;
 	// pi re-runs this factory for every new session but keeps the module cached, so clear the flag here.
 	// Left alone it would carry the previous session's registration into this one, whose tool table is empty,
 	// and startWatchdog would skip registerStopTool, leaving the AI without stop_watchdog.
 	toolRegistered = false;
+	// Same reason: a stop whose run never settled must not follow us into the new session.
+	pendingProactiveStop = null;
 
 	// Must run now, not at start: resuming a session replays saved nudge messages, and a missing renderer would show their raw text.
 	registerDecisionCardRenderers(pi);
@@ -131,8 +150,9 @@ export default function (extensionApi: ExtensionAPI) {
 	pi.on("message_end", onMessageEnd);
 	// A run ends: remember if the user pressed ESC.
 	pi.on("agent_end", onAgentEnd);
-	// Run fully settled: close the decision turn, or start the countdown again.
+	// Run fully settled: write a proactive stop's card and fold marker, close the decision turn, re-arm.
 	pi.on("agent_settled", onAgentSettled);
+	pi.on("agent_settled", onProactiveStopSettled);
 	pi.on("session_shutdown", onSessionShutdown);
 	pi.events.on("watchdog:state:query", publishState);
 
@@ -221,7 +241,10 @@ function onAgentEnd(event: AgentEndEvent, ctx: ExtensionContext) {
 	publishState();
 }
 
-/** A message is saved: strip the decision reply (it says nothing useful and is folded anyway); copy it to the card first so the TUI can still show it. */
+/**
+ * A message is saved: strip the decision reply (it says nothing useful and is folded anyway); copy it to
+ * the card first so the TUI can still show it.
+ */
 function onMessageEnd(event: MessageEndEvent) {
 	if (event.message.role !== "assistant") return;
 	const message = event.message as { content?: unknown; stopReason?: unknown; errorMessage?: unknown };
@@ -323,6 +346,20 @@ async function onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext) 
 	armCountdown(ctx); // Retries and queued turns are done, so count down again.
 }
 
+/**
+ * Record an AI stop taken outside a check turn. Held until the run settles because both halves of the
+ * record belong after the wrap-up: the history card describes a finished stop, and the fold marker has
+ * to be the last row of the turn it closes. Writing them here, not inside the tool, is what keeps the
+ * AI's closing text inside the folded range instead of leaving it in every later request.
+ */
+function onProactiveStopSettled(_event: AgentSettledEvent) {
+	const stop = pendingProactiveStop;
+	pendingProactiveStop = null;
+	if (stop === null) return;
+	recordProactiveStop(stop);
+	markProactiveStop(stop);
+}
+
 /** A real user message wakes a paused keep-mode run and clears the ESC stop; extension messages are our own nudges, so skip them. */
 function onInput(event: InputEvent, ctx: ExtensionContext) {
 	if (event.source === "extension") return;
@@ -338,6 +375,7 @@ function onInput(event: InputEvent, ctx: ExtensionContext) {
 /** Session closing: clean up. A reload just rebinds extensions, so don't broadcast a fake stop. */
 function onSessionShutdown(event: SessionShutdownEvent, ctx: ExtensionContext) {
 	decisionWindow = null;
+	pendingProactiveStop = null;
 	// Session is going away, so stop hard; on reload keep quiet, others just get rebound.
 	teardown(ctx, true, event.reason !== "reload");
 	// Session replacement (/clear, /resume, /fork) makes this ctx stale before the next session_start.
@@ -749,6 +787,47 @@ function startTicker() {
 
 // ---------- the stop tool ----------
 
+/**
+ * Write the history card for an AI-initiated stop taken outside a decision turn.
+ *
+ * A check leaves a trace on the timeline by itself (its hint, its reply, its result card). A proactive
+ * stop has no check behind it, so without this row the watchdog goes quiet with nothing on screen but
+ * the status bar blinking off — the user cannot tell the AI finished on purpose from the plugin dying.
+ * A history record, so it stays readable in `/tree` and never enters the model context.
+ */
+function recordProactiveStop(stop: PendingProactiveStop) {
+	pi.appendEntry<DecisionCardData>(DECISION_ENTRY_TYPE, {
+		// The card and the fold marker share one id, so a card can be read next to the range it explains.
+		exchangeId: stop.exchangeId,
+		outcome: "stop",
+		proactive: true,
+		suspended: stop.suspended,
+		nudgeCount: stop.nudgeCount,
+		maxNudges: state.maxNudges,
+		ts: Date.now(),
+	});
+}
+
+/**
+ * Write the marker that closes a proactive stop's fold range.
+ *
+ * Sent after the run rather than from the tool: a `pi.sendMessage` from a running tool defers to
+ * turn_end, which is too late — the wrap-up text the AI wrote after the tool call sits queued in front
+ * of it, and would end up on the wrong side of the range. Written here, the marker lands last, naming
+ * the tool call so folding can find the range without depending on the order it was saved in.
+ */
+function markProactiveStop(stop: PendingProactiveStop) {
+	pi.sendMessage(
+		{
+			customType: STOP_MESSAGE_TYPE,
+			content: "",
+			display: false,
+			details: { exchangeId: stop.exchangeId, toolCallId: stop.toolCallId },
+		},
+		{ triggerTurn: false },
+	);
+}
+
 /** Register stop_watchdog; startWatchdog calls this on the first start. pi lets us register after startup. */
 function registerStopTool() {
 	pi.registerTool({
@@ -762,7 +841,7 @@ function registerStopTool() {
 		renderShell: "self",
 		renderCall: () => new Text("", 0, 0),
 		renderResult: () => new Text("", 0, 0),
-		async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+		async execute(toolCallId, _params, _signal, _onUpdate, ctx) {
 			if (!state.running) {
 				return {
 					content: [
@@ -785,6 +864,15 @@ function registerStopTool() {
 			teardown(ctx, false);
 			// A call inside the decision window means the result is stop; the fold marker and card drop in agent_settled.
 			if (decisionWindow !== null) decisionWindow.stopCalled = true;
+			else {
+				// No check turn: hold the record until the run settles, so the AI's wrap-up lands inside the folded range.
+				pendingProactiveStop = {
+					exchangeId: createExchangeId(),
+					toolCallId,
+					suspended: state.suspended,
+					nudgeCount: state.nudgeCount,
+				};
+			}
 			// Same as a user ESC (app.interrupt): after stop_watchdog the AI usually has only closing text or extra moves, so abort now to cut it off.
 			if (!ctx.isIdle()) {
 				stopAbortPending = true;

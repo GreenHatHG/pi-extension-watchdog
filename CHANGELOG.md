@@ -6,6 +6,7 @@
 
 ### 改变
 
+- **AI 主动收尾会留一张卡片，并在请求视图里折叠掉**：`stop_watchdog` 在工作回合末尾被直接调用（不在决策回合里）时，以前只会把状态栏清掉或改成 `⏱⏸`，时间线上没有任何一行。这次补两件事：一是 `pi-watchdog:decision` 历史记录（`outcome: "stop"` + `proactive: true`），渲染成 `⏱ watchdog: stopped on purpose · monitoring paused · no check`（后两截按实际情况出现）；二是同一次调用另发一条折叠标记 `pi-watchdog:stopped`，在发出请求前把该回合的收尾文字、`stop_watchdog` 调用与返回整段删掉。标记以工具调用 id 定位区间，不靠保存顺序，因此 AI 在调用之后又写了一句收尾也会一并落在区间内；找不到那次调用（已被压缩）就保留，宁可不折叠也不误删。在决策回合里停止仍走原来的路径，只在结算时写一张带 `suspended` 的卡片，不会多出一行；历史卡片与标记共用同一个 id。
 - **时间线上的卡片带 `watchdog:` 前缀**：决策提示与决策结果两类卡片都由 `⏱ watchdog: ...` 起头，和其他插件输出的卡片区分开，一眼看得出是谁发的。
 - **检查失败自动重试，并计入 `max` 次数**：决策检查本身撞上 provider 错误（网络抖动、限流、超时）时，以前只会按 `superseded` 记录一张卡片，然后老实等下一次空闲倒计时——白等一个 timeout。现在失败会当场补发一条新检查（不等倒计时），并把这次重试当成一次正常催促计入 `max` 预算，所以连续失败也会在 `max` 次后按「催不动」自动停下，不会绕过卡死保险。判定放在 `agent_settled`（那时才确定没有内部重试会救回来），`agent_end` 只把最新一次尝试的结果记进决策窗口；`stop_watchdog` 主动中止留下的幻影 `stopReason: "error"` 消息被排除在外。失败那张卡片新增 `failed` 结果（`⏱ watchdog: check failed, retrying`），展开可见 provider 的报错原文。
 - **决策结果上屏：时间线上多一行摘要，可展开看 AI 的回复**。以前一次检查只看得见「问题」（决策提示），模型那句被剥离的回复只能去 `/tree` 或会话文件里找。现在 `pi-watchdog:decision` 记录也注册了渲染器，在提示下方显示一行 `⏱ watchdog: still working · click to expand` / `⏱ watchdog: stopped on purpose` / `⏱ watchdog: superseded` / `⏱ watchdog: check failed, retrying`，点击展开就是那句回复；常驻模式下 AI 主动停止时多标 `· monitoring paused`。先调 `stop_watchdog` 的那次检查没有回复可看（收尾文字在工具调用之前输出，落盘时已清空），这种卡片只显示结果。两种摘要的展开状态各自记在 `src/expanded.ts`，每开新会话时清空——渲染器组件由 pi 缓存，会跨会话存活。折叠逻辑不变：它仍是 `CustomEntry`，不进模型上下文。

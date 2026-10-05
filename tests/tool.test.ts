@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { DECISION_ENTRY_TYPE, STOP_MESSAGE_TYPE } from "../src/constants.ts";
+import type { DecisionCardData } from "../src/decision-card.ts";
 import { continuationMessages, nudgeMessages, setup } from "./helpers/setup.js";
+
+/** Decision cards saved so far (the CustomEntry rows from appendEntry). */
+const cards = (rt: { entries: { customType: string; data: any }[] }) =>
+	rt.entries.filter((e) => e.customType === DECISION_ENTRY_TYPE).map((e) => e.data as DecisionCardData);
 
 beforeEach(() => {
 	vi.useFakeTimers();
@@ -25,6 +31,43 @@ it("the AI calls stop_watchdog (once mode) → fully stop, and the tool stays re
 	expect(continuationMessages(rt)).toHaveLength(0); // no continue message after a stop
 	expect(nudgeMessages(rt)).toHaveLength(1); // and no new decision turn either
 	expect(rt.activeTools.has("stop_watchdog")).toBe(true); // registered for good, no longer removed on start/stop
+});
+
+it("a proactive stop is recorded once its run settles, card and fold marker both after the wrap-up", async () => {
+	const rt = await setup();
+	await rt.commands.get("watchdog").handler("timeout=60", rt.ctx);
+	rt.state.idle = false; // AI is mid-run; no decision window is open
+	expect(cards(rt)).toHaveLength(0);
+
+	await rt.tools.get("stop_watchdog").execute("t1", {}, undefined, undefined, rt.ctx);
+	// Nothing yet: the wrap-up text queued behind the tool call has to land inside the folded range first.
+	expect(cards(rt)).toHaveLength(0);
+	expect(rt.customMessages.filter((m) => m.customType === STOP_MESSAGE_TYPE)).toHaveLength(0);
+
+	await rt.settleAfterRun();
+	const found = cards(rt);
+	expect(found).toHaveLength(1);
+	expect(found[0]).toMatchObject({ outcome: "stop", proactive: true, suspended: false, nudgeCount: 0 });
+
+	const markers = rt.customMessages.filter((m) => m.customType === STOP_MESSAGE_TYPE);
+	expect(markers).toHaveLength(1);
+	expect(markers[0]?.details).toMatchObject({ exchangeId: found[0]?.exchangeId, toolCallId: "t1" });
+});
+
+it("a check whose answer is stop writes the card at settle, not at the tool call, and marks it as part of the check", async () => {
+	const rt = await setup();
+	await rt.commands.get("watchdog").handler("timeout=1 mode=keep", rt.ctx);
+	await rt.settleAfterRun();
+	await vi.advanceTimersByTimeAsync(1100); // decision window opens
+
+	await rt.tools.get("stop_watchdog").execute("t1", {}, undefined, undefined, rt.ctx);
+	expect(cards(rt)).toHaveLength(0); // nothing yet: the turn may still say a closing line
+
+	await rt.settleAfterRun();
+	const found = cards(rt);
+	expect(found).toHaveLength(1); // exactly one card, not one per writer
+	expect(found[0]).toMatchObject({ outcome: "stop", suspended: true });
+	expect(found[0]?.proactive).toBeUndefined();
 });
 
 it("calling stop_watchdog proactively, before any nudge, stops monitoring and clears the abort phantom error", async () => {

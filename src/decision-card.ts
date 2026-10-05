@@ -13,6 +13,8 @@ export interface DecisionCardData {
 	reply?: string;
 	/** outcome=stop in keep mode: monitoring only paused, the next user message resumes it. */
 	suspended?: boolean;
+	/** The AI stopped the watchdog itself, mid-turn: there was no check turn, so the row says so. */
+	proactive?: boolean;
 	nudgeCount: number;
 	maxNudges: number;
 	ts: number;
@@ -124,7 +126,8 @@ class DecisionCardComponent extends DecisionRow {
 		const outcome = OUTCOME_LABEL[this.data.outcome] ?? this.data.outcome;
 		const paused =
 			this.data.outcome === "stop" && this.data.suspended ? ` ${theme.fg("dim", "· monitoring paused")}` : "";
-		return `${theme.fg("muted", "⏱")} ${this.prefix(theme)}${theme.fg("accent", outcome)}${this.toggleHint(expanded)}${paused}`;
+		const noCheck = this.data.proactive ? ` ${theme.fg("dim", "· no check")}` : "";
+		return `${theme.fg("muted", "⏱")} ${this.prefix(theme)}${theme.fg("accent", outcome)}${this.toggleHint(expanded)}${paused}${noCheck}`;
 	}
 }
 
