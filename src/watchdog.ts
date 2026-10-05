@@ -29,7 +29,8 @@ import {
 	STATUS_KEY,
 	TOOL_NAME,
 } from "./constants.ts";
-import { type DecisionCardData, registerDecisionHintRenderer } from "./decision-card.ts";
+import { type DecisionCardData, registerDecisionCardRenderers } from "./decision-card.ts";
+import { expandedCardIds, expandedHintIds } from "./expanded.ts";
 import { registerWatchdogContextFolding } from "./fold.ts";
 import { MODE_POLICY, modeFromKeepAlive, type WatchdogMode } from "./mode.ts";
 import { isRecord, isRestoredReason, textFromContent } from "./utils.ts";
@@ -106,7 +107,10 @@ export default function (extensionApi: ExtensionAPI) {
 	toolRegistered = false;
 
 	// Must run now, not at start: resuming a session replays saved nudge messages, and a missing renderer would show their raw text.
-	registerDecisionHintRenderer(pi);
+	registerDecisionCardRenderers(pi);
+	// Both types of a check keep one open state per exchange by entry id, so they reset on a new run.
+	expandedHintIds.clear();
+	expandedCardIds.clear();
 
 	// ---- Every hook we listen to, in lifecycle order. ----
 
@@ -275,7 +279,9 @@ async function onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext) 
 				{ triggerTurn: true, deliverAs: "followUp" },
 			);
 		}
-		// History record only: the result card has no TUI renderer, since the nudge hint already marks the check.
+		// History record only: it gets a TUI renderer and stays for reading back, but never enters the model context.
+		// One entry per exchange, holding whatever the turn said. A stop leaves no reply, since the reply is cleared
+		// before it is saved and the wrap-up text ran before the tool call.
 		pi.appendEntry<DecisionCardData>(DECISION_ENTRY_TYPE, {
 			exchangeId: window.exchangeId,
 			outcome,

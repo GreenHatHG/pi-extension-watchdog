@@ -22,13 +22,42 @@ const theme = {
 	bold: (text: string) => text,
 };
 
+const clickLeft = {
+	type: "click",
+	button: "left",
+	x: 0,
+	y: 0,
+	screenX: 0,
+	screenY: 0,
+	width: 80,
+	height: 3,
+	shift: false,
+	alt: false,
+	ctrl: false,
+};
+
+/** Render a nudge row the way the TUI does: one component, rendered through the renderer. */
+const hintView = (
+	rt: { messageRenderers: Map<string, any> },
+	message: { content: string; details: { exchangeId: string } },
+	expanded = false,
+) => rt.messageRenderers.get(DECISION_MESSAGE_TYPE)!(message, { expanded }, theme);
+
+/** Render a saved decision card. */
+const cardView = (rt: { entryRenderers: Map<string, any> }, data: DecisionCardData, entryId = "e1", expanded = false) =>
+	rt.entryRenderers.get(DECISION_ENTRY_TYPE)!(
+		{ id: entryId, customType: DECISION_ENTRY_TYPE, data } as any,
+		{ expanded },
+		theme,
+	);
+
 it("outcome continue drops one card with the AI reply", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx);
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1100); // decision turn
 
-	// The check hint is the visible nudge message; the result entry is a hidden history record.
+	// The check hint is the visible nudge message; the result entry is a history record.
 	expect(nudgeMessages(rt)[0]?.display).toBe(true);
 
 	await rt.emitMessageEnd({ role: "assistant", content: [{ type: "text", text: "still working on it" }] });
@@ -51,6 +80,10 @@ it("when the AI calls stop_watchdog the card says stopped on purpose and keeps t
 	await vi.advanceTimersByTimeAsync(1100); // decision turn
 
 	await rt.tools.get("stop_watchdog").execute("t1", {}, undefined, undefined, rt.ctx);
+	// Nothing is saved yet: the turn may still say a closing line, and history holds one entry per exchange.
+	expect(cards(rt)).toHaveLength(0);
+
+	// Extra text in the same message as the tool call lands in that entry, not a second one.
 	await rt.emitMessageEnd({
 		role: "assistant",
 		content: [
@@ -94,17 +127,12 @@ it("a very long AI reply is cut to the cap before saving", async () => {
 	expect(found[0].reply).toBe(long.slice(0, 300));
 });
 
-it("the saved result card has no TUI renderer, so the timeline stays quiet", async () => {
-	const rt = await setup();
-	expect(rt.entryRenderers.get(DECISION_ENTRY_TYPE)).toBeUndefined();
-});
-
 it("the nudge message renders as a collapsed hint and shows the prompt only when expanded", async () => {
 	const rt = await setup();
 	const renderer = rt.messageRenderers.get(DECISION_MESSAGE_TYPE);
 	expect(renderer).toBeTypeOf("function");
 
-	const message = { customType: DECISION_MESSAGE_TYPE, content: DECISION_MESSAGE, details: { exchangeId: "w1" } };
+	const message = { content: DECISION_MESSAGE, details: { exchangeId: "w1" } };
 	const collapsed = renderer!(message, { expanded: false }, theme).render(80).join("\n");
 	expect(collapsed).toContain("Sending decision message");
 	expect(collapsed).not.toContain("Watchdog check");
@@ -119,22 +147,8 @@ it("the decision prompt names stop_watchdog as the only allowed tool, so it does
 
 it("in fullscreen the hint expands on click and collapses on a second click", async () => {
 	const rt = await setup();
-	const renderer = rt.messageRenderers.get(DECISION_MESSAGE_TYPE);
-	const message = { customType: DECISION_MESSAGE_TYPE, content: DECISION_MESSAGE, details: { exchangeId: "click-1" } };
-	const view = renderer!(message, { expanded: false }, theme);
-	const clickLeft = {
-		type: "click",
-		button: "left",
-		x: 0,
-		y: 0,
-		screenX: 0,
-		screenY: 0,
-		width: 80,
-		height: 3,
-		shift: false,
-		alt: false,
-		ctrl: false,
-	};
+	const message = { content: DECISION_MESSAGE, details: { exchangeId: "click-1" } };
+	const view = hintView(rt, message);
 
 	expect(view.render(80).join("\n")).toContain("Sending decision message");
 	expect(view.render(80).join("\n")).not.toContain("Watchdog check");
@@ -142,6 +156,67 @@ it("in fullscreen the hint expands on click and collapses on a second click", as
 	expect(view.render(80).join("\n")).toContain("Watchdog check");
 	view.handleMouse(clickLeft);
 	expect(view.render(80).join("\n")).not.toContain("Watchdog check");
+});
+
+it("the saved card renders its outcome collapsed and the AI reply only when expanded", async () => {
+	const rt = await setup();
+	const data: DecisionCardData = {
+		exchangeId: "w1",
+		outcome: "continue",
+		reply: "still working on the parser",
+		nudgeCount: 2,
+		maxNudges: 50,
+		ts: 0,
+	};
+
+	const collapsed = cardView(rt, data).render(80).join("\n");
+	expect(collapsed).toContain("still working");
+	expect(collapsed).toContain("click to expand");
+	expect(collapsed).not.toContain("still working on the parser"); // the reply is what the timeline never showed
+
+	const expanded = cardView(rt, data, "e1", true).render(80).join("\n");
+	expect(expanded).toContain("still working on the parser");
+});
+
+it("the card shows the stop outcome, a paused note in keep mode, and a reply only when there is one", async () => {
+	const rt = await setup();
+	const base: DecisionCardData = { exchangeId: "w1", outcome: "stop", nudgeCount: 3, maxNudges: 50, ts: 0 };
+
+	const paused = cardView(rt, { ...base, suspended: true })
+		.render(80)
+		.join("\n");
+	expect(paused).toContain("stopped on purpose");
+	expect(paused).toContain("monitoring paused");
+	// No reply means nothing to expand, so the row carries no toggle.
+	expect(paused).not.toContain("click to expand");
+
+	const withReply = cardView(rt, { ...base, reply: "wrapping up" })
+		.render(80)
+		.join("\n");
+	expect(withReply).toContain("click to expand");
+});
+
+it("clicking a card expands it, and the open state survives a rebuilt component", async () => {
+	const rt = await setup();
+	const data: DecisionCardData = {
+		exchangeId: "w1",
+		outcome: "continue",
+		reply: "no work remains",
+		nudgeCount: 1,
+		maxNudges: 50,
+		ts: 0,
+	};
+
+	const view = cardView(rt, data, "e1");
+	expect(view.render(80).join("\n")).not.toContain("no work remains");
+	view.handleMouse(clickLeft);
+	expect(view.render(80).join("\n")).toContain("no work remains");
+
+	// A theme change builds a new component; the remembered open set has to bring the reply back.
+	const rebuilt = cardView(rt, data, "e1");
+	expect(rebuilt.render(80).join("\n")).toContain("no work remains");
+	rebuilt.handleMouse(clickLeft);
+	expect(rebuilt.render(80).join("\n")).not.toContain("no work remains");
 });
 
 it("a keep-mode stop still records the paused state in history", async () => {
