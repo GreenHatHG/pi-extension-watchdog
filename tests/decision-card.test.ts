@@ -134,10 +134,12 @@ it("the nudge message renders as a collapsed hint and shows the prompt only when
 
 	const message = { content: DECISION_MESSAGE, details: { exchangeId: "w1" } };
 	const collapsed = renderer!(message, { expanded: false }, theme).render(80).join("\n");
+	expect(collapsed).toContain("watchdog:"); // each card names its plugin
 	expect(collapsed).toContain("Sending decision message");
 	expect(collapsed).not.toContain("Watchdog check");
 
 	const expanded = renderer!(message, { expanded: true }, theme).render(80).join("\n");
+	expect(expanded).toContain("watchdog:");
 	expect(expanded).toContain("Watchdog check");
 });
 
@@ -170,6 +172,7 @@ it("the saved card renders its outcome collapsed and the AI reply only when expa
 	};
 
 	const collapsed = cardView(rt, data).render(80).join("\n");
+	expect(collapsed).toContain("watchdog:"); // every card names its plugin, even result rows
 	expect(collapsed).toContain("still working");
 	expect(collapsed).toContain("click to expand");
 	expect(collapsed).not.toContain("still working on the parser"); // the reply is what the timeline never showed

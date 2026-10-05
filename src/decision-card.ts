@@ -26,6 +26,12 @@ const OUTCOME_LABEL: Record<DecisionCardData["outcome"], string> = {
 };
 
 /**
+ * All plugin output on the timeline carries this marker, so a card is recognizable as watchdog's
+ * and not some other extension's, whatever the user has installed alongside it.
+ */
+const CARD_PREFIX = "watchdog:";
+
+/**
  * One line per check, expandable to its detail: collapsed it announces what happened, expanded it
  * shows the text that never reached the timeline. A click toggles it, and the open set survives a
  * theme change, which rebuilds the component.
@@ -61,6 +67,11 @@ abstract class DecisionRow implements Component {
 		return box;
 	}
 
+	/** The `watchdog:` tag every row starts with, so the card names its source. */
+	protected prefix(theme: Theme): string {
+		return `${theme.fg("muted", CARD_PREFIX)} `;
+	}
+
 	/** `· click to expand` / `· click to collapse`, added only when there is a detail to show. */
 	protected toggleHint(expanded: boolean): string {
 		if (!this.detail) return "";
@@ -93,7 +104,7 @@ class DecisionHintComponent extends DecisionRow {
 	}
 
 	protected label(theme: Theme, expanded: boolean): string {
-		return `${theme.fg("muted", "⏱")} ${theme.fg("accent", "Sending decision message")}${this.toggleHint(expanded)}`;
+		return `${theme.fg("muted", "⏱")} ${this.prefix(theme)}${theme.fg("accent", "Sending decision message")}${this.toggleHint(expanded)}`;
 	}
 }
 
@@ -112,7 +123,7 @@ class DecisionCardComponent extends DecisionRow {
 		const outcome = OUTCOME_LABEL[this.data.outcome] ?? this.data.outcome;
 		const paused =
 			this.data.outcome === "stop" && this.data.suspended ? ` ${theme.fg("dim", "· monitoring paused")}` : "";
-		return `${theme.fg("muted", "⏱")} ${theme.fg("accent", outcome)}${this.toggleHint(expanded)}${paused}`;
+		return `${theme.fg("muted", "⏱")} ${this.prefix(theme)}${theme.fg("accent", outcome)}${this.toggleHint(expanded)}${paused}`;
 	}
 }
 

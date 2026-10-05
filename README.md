@@ -107,11 +107,11 @@ AI 停止输出、进入空闲后开始倒计时；倒计时期间 AI 再次运�
 
 一次催促由两条消息组成：
 
-- **决策消息**：在 TUI 时间线里只占一行折叠提示——`⏱ Sending decision message · click to expand`，点击（或 `ctrl+o`）展开可看发给模型的决策提示全文。它只是视图层可见，发给模型的请求里会被折叠掉（见文末），所以不进上下文。这一回合**禁止干活**——除 `stop_watchdog` 外的工具调用全被拦截，AI 只能：
+- **决策消息**：在 TUI 时间线里只占一行折叠提示——`⏱ watchdog: Sending decision message · click to expand`（`watchdog:` 前缀标明来源插件），点击（或 `ctrl+o`）展开可看发给模型的决策提示全文。它只是视图层可见，发给模型的请求里会被折叠掉（见文末），所以不进上下文。这一回合**禁止干活**——除 `stop_watchdog` 外的工具调用全被拦截，AI 只能：
   - 回一句文字 = 还有活；或
   - 调 `stop_watchdog` = 没活 / 在等你。
 
-  AI 的这句回复会在落盘前被剥离（带 `stop_watchdog` 时也只保留工具调用块以维持配对），不会进会话文件与压缩摘要。每次检查的结果另以 `pi-watchdog:decision` 的 `appendEntry` 存进会话历史（继续 / AI 主动停止 / 用户接管作废 + 截断 300 字的 AI 回复），它在时间线上占一行折叠摘要——`⏱ still working · click to expand` / `⏱ stopped on purpose`，点击展开就是 AI 那句被剥离的回复。它不进模型上下文。常驻模式下 AI 主动停止时会多标一句 `· monitoring paused`。
+  AI 的这句回复会在落盘前被剥离（带 `stop_watchdog` 时也只保留工具调用块以维持配对），不会进会话文件与压缩摘要。每次检查的结果另以 `pi-watchdog:decision` 的 `appendEntry` 存进会话历史（继续 / AI 主动停止 / 用户接管作废 + 截断 300 字的 AI 回复），它在时间线上占一行折叠摘要——`⏱ watchdog: still working · click to expand` / `⏱ watchdog: stopped on purpose`，点击展开就是 AI 那句被剥离的回复。它不进模型上下文。常驻模式下 AI 主动停止时会多标一句 `· monitoring paused`。
 
   先调 `stop_watchdog` 的那次检查没有回复可看：收尾文字在工具调用之前就输出完了，这一分支里只剩工具调用块，落盘时也已被清空（`superseded` 同理）。这种卡片只显示结果。
 
