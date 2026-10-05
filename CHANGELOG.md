@@ -19,6 +19,7 @@
 
 - 决策结果记录（`pi-watchdog:decision`）：每次决策检查结算后写一张 `appendEntry`，记下结果（继续 / AI 主动停止 / 用户接管作废）、挂起状态与截断 300 字的 AI 回复。它不注册 TUI 渲染器（不在时间线出现），不进模型上下文、不参与折叠，`/resume` 后仍可从 `/tree` 或会话文件读到。
 - `pi.on("context")` 折叠钩子与 `foldWatchdogContext` 纯函数（跨 resume/reload 成立，关联不完整时 fail closed）。
+- 多会话共存回归测试（`tests/session-reuse.test.ts`）：同一进程里连开两个会话，两个都必须拿到 `stop_watchdog`。现有用例每条都 `vi.resetModules()`，只覆盖「模块首次加载」，所以漏掉了这个缺陷。
 - 决策消息改为带 `exchangeId` 的 CustomMessage（`pi-watchdog:nudge` / `:continuation` / `:fold`），折叠关联只靠消息自身的 `customType` + `exchangeId`，不依赖额外落盘信息。
 - 决策回合的模型回复在落盘前被剥离（带工具调用时只保留工具调用块），避免这段已折叠内容在 TUI 里以原始消息的形式重复出现；剥离前的内容只留在 `pi-watchdog:decision` 历史记录里。
 - 决策期间用户插话 / 回合没回到空闲时写 `superseded` 终点标记，整段交换照样被折叠，不会把决策提示词永久留在上下文。
@@ -26,6 +27,7 @@
 
 ### 修复
 
+- **同一进程的第二个会话拿不到 `stop_watchdog`**：`toolRegistered` 在 `8ce99c8` 拆分时被搬到了模块顶层，而 pi 只为新会话重跑插件工厂、不重载模块，于是下一个会话带着上一个会话的 `true` 开局，`startWatchdog` 跳过注册。该会话的工具表是空的，AI 看不到工具、`onToolCall` 的白名单永不命中，决策回合只能以 `continue` 收场，一路催到上限（实测 14 次）。现在改回 `427eff6` 的语义：开关留在模块层，但每次工厂执行时先重置为 `false`。
 - **决策提示不再自相矛盾**：原文写着「本回合不要用工具」，紧接着又要求「以 `stop_watchdog` 收尾」。现在提示词与拦截原因都改成「除 `stop_watchdog` 外的工具都被拦截」，与 `onToolCall` 的实际放行名单一致。
 - **会话替换（`/clear`、`/resume`、`/fork`）后不再触碰失效的旧 ctx**：`startWatchdog` 现在把新会话的 `ctx` 传给 `teardown`，`session_shutdown` 也会清空缓存的 `activeCtx`，修掉 `This extension ctx is stale after session replacement` 报错。
 - **决策回合被 `Esc` 中止时不再误判为「还有活 → 继续」**：中止发生在决策窗口内时按 `superseded` 收口（不发继续消息、整段交换折叠），并在中止的回合里夹有真实用户消息时提示「插话可能未被处理，请重发」。

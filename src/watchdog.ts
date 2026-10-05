@@ -100,6 +100,10 @@ let stopAbortPending = false;
 
 export default function (extensionApi: ExtensionAPI) {
 	pi = extensionApi;
+	// pi re-runs this factory for every new session but keeps the module cached, so clear the flag here.
+	// Left alone it would carry the previous session's registration into this one, whose tool table is empty,
+	// and startWatchdog would skip registerStopTool, leaving the AI without stop_watchdog.
+	toolRegistered = false;
 
 	// Must run now, not at start: resuming a session replays saved nudge messages, and a missing renderer would show their raw text.
 	registerDecisionHintRenderer(pi);
