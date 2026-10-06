@@ -111,7 +111,7 @@ AI 停止输出、进入空闲后开始倒计时；倒计时期间 AI 再次运�
 一次催促由两条消息组成：
 
 - **决策消息**：在 TUI 时间线里只占一行折叠提示——`⏱ watchdog: Sending decision message · click to expand`（`watchdog:` 前缀标明来源插件），点击（或 `ctrl+o`）展开可看发给模型的决策提示全文。它只是视图层可见，发给模型的请求里会被折叠掉（见文末），所以不进上下文。这一回合**禁止干活**——除 `stop_watchdog` 外的工具调用全被拦截，AI 只能：
-  - 回一句文字 = 还有活；或
+  - 回一句文字 = 还有活（提示词已写明这条映射，所以「我干完了」这种完成声明也会被当成还有活，白跑一轮）；或
   - 调 `stop_watchdog` = 没活 / 在等你。
 
   AI 的这句回复会在落盘前被剥离（带 `stop_watchdog` 时也只保留工具调用块以维持配对），不会进会话文件与压缩摘要。每次检查的结果另以 `pi-watchdog:decision` 的 `appendEntry` 存进会话历史（继续 / AI 主动停止 / 用户接管作废 / 检查失败 + 截断 300 字的 AI 回复，失败时存 provider 的报错原文），它在时间线上占一行折叠摘要——`⏱ watchdog: still working · click to expand` / `⏱ watchdog: stopped on purpose` / `⏱ watchdog: check failed, retrying`，点击展开就是 AI 那句被剥离的回复。它不进模型上下文。常驻模式下 AI 主动停止时会多标一句 `· monitoring paused`。
@@ -120,9 +120,9 @@ AI 停止输出、进入空闲后开始倒计时；倒计时期间 AI 再次运�
 
   `stop_watchdog` 不只在决策回合可调：AI 真正完工（或只在等你决策）时，可以不等倒计时、在工作回合末尾直接调用它，省掉一次「干等 timeout + 空决策往返」。这时监控同样停止（常驻模式下则挂起）。这条路径没有决策回合，也就没有前两类卡片可看，所以它单独写一张结果卡片——`⏱ watchdog: stopped on purpose · monitoring paused · no check`（后两截按实际情况出现：普通模式没有 `monitoring paused`，两者拼在一起时才最全）。卡片只说明「谁停的、为什么没有检查回合」，没有可展开的回复，和检查里判定停止的那张一样。
 - **继续消息**：决策结果为「继续」时才发出，是真正触发工作回合的那条。固定触发行 + 可选追加指令：
-  > [Automated, not user input] If work remains, continue working (no reply needed). If waiting on a user decision, don't change code — state what you need, then call stop_watchdog as your final action. If no work remains and no decision is pending, call stop_watchdog to end the turn.
+  > [Automated, not user input] If work remains, continue working (no reply needed). If waiting on a user decision, don't change code — state what you need in one line, don't restate an answer you already delivered, then call stop_watchdog as your final action. If no work remains and no decision is pending, call stop_watchdog to end the turn.
 
-  它按「AI 为什么停下」分三种情况给出对应动作：还有活就继续干（无需回复）；在等用户决策就不改代码，说明需要什么后以 `stop_watchdog` 收尾；没活也没待决策就调 `stop_watchdog` 结束回合。开头的 `[Automated, not user input]` 前缀让 AI 知道这不是真用户发言，不会把它当成新的用户指令。
+  它按「AI 为什么停下」分三种情况给出对应动作：还有活就继续干（无需回复）；在等用户决策就不改代码，一行说明需要什么后以 `stop_watchdog` 收尾（不要复述已经交付过的答案）；没活也没待决策就调 `stop_watchdog` 结束回合。开头的 `[Automated, not user input]` 前缀让 AI 知道这不是真用户发言，不会把它当成新的用户指令。
 - **追加指令**：可选。`message=` 设置的文案不会替换触发行，而是作为 `Task instruction` 追加在继续消息之后，保证自定义文案不会丢失触发行「继续干活 / 等决策时说明需求 / 主动停止」的核心语义。
 
 ### TUI 上的痕迹

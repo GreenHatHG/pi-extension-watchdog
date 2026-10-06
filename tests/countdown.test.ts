@@ -27,6 +27,8 @@ it("first start with an empty session → no countdown until the first agent_set
 
 	await rt.settleAfterRun(); // decision turn ends (model replied text) → continue message
 	expect(rt.sentMessages.filter((m) => m === DEFAULT_MESSAGE)).toHaveLength(1);
+	// The continue message must not invite a repeat of an answer the model already delivered.
+	expect(DEFAULT_MESSAGE).toContain("don't restate an answer you already delivered");
 
 	await rt.settleAfterRun();
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);

@@ -3,7 +3,9 @@ export const DEFAULT_MAX_NUDGES = 50;
 /** Nudge trigger line; message= only adds to it, never replaces it. */
 export const DEFAULT_MESSAGE =
 	"[Automated, not user input] If work remains, continue working (no reply needed). " +
-	"If waiting on a user decision, don't change code — state what you need, then call stop_watchdog as your final action. " +
+	// "Don't restate" is here on purpose: without it, "state what you need" reads as an invitation to
+	// repeat a finished report, and that repeat lands after the fold range, so it stays in context forever.
+	"If waiting on a user decision, don't change code — state what you need in one line, don't restate an answer you already delivered, then call stop_watchdog as your final action. " +
 	"If no work remains and no decision is pending, call stop_watchdog to end the turn.";
 
 /** Build the continue message: fixed trigger line plus any extra order. */
@@ -13,11 +15,14 @@ export function continuationText(hint?: string): string {
 
 /**
  * Decision-turn prompt and fold start; the turn only allows text or stop_watchdog, so it folds as one clean block.
+ * The mapping is spelled out because it is not guessable: text means "still working", whatever the text says.
+ * A model that answers the check with "all done" therefore buys itself another work turn and repeats itself.
  */
 export const DECISION_MESSAGE =
 	"[Automated, not user input] Watchdog check — every tool except stop_watchdog is blocked in this turn. " +
-	"Reply with a brief acknowledgement if work remains. If no work remains, or you are waiting on a " +
-	"user decision, call stop_watchdog as your final action.";
+	'Any text reply is read as "work remains" and starts another work turn, so only reply briefly if work is left, ' +
+	"and never restate or summarize an answer you already gave. " +
+	"If no work remains, or you are waiting on a user decision, call stop_watchdog as your final action.";
 
 /** How long after the last key press we still treat the user as busy, so we hold the countdown. */
 export const ACTIVITY_GRACE_MS = 2000;

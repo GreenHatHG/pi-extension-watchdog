@@ -147,6 +147,13 @@ it("the decision prompt names stop_watchdog as the only allowed tool, so it does
 	expect(DECISION_MESSAGE).toContain("every tool except stop_watchdog is blocked");
 });
 
+it("the decision prompt spells out that text means still working, so a 'done' reply is not read as done", () => {
+	// The check turn has no other channel: the model has to know that answering with words buys another
+	// work turn, or "all done, here is the report again" costs a round and repeats itself.
+	expect(DECISION_MESSAGE).toContain('text reply is read as "work remains"');
+	expect(DECISION_MESSAGE).toContain("never restate");
+});
+
 it("in fullscreen the hint expands on click and collapses on a second click", async () => {
 	const rt = await setup();
 	const message = { content: DECISION_MESSAGE, details: { exchangeId: "click-1" } };
