@@ -49,4 +49,10 @@ export const DECISION_ENTRY_TYPE = "pi-watchdog:decision";
 /** Max reply chars kept in the history record, to keep session files small but still readable. */
 export const DECISION_REPLY_MAX_CHARS = 300;
 
+/**
+ * Card detail for a check that came back with nothing at all: no text, no tool call.
+ * Says what happened instead of pretending the model answered something.
+ */
+export const EMPTY_REPLY_NOTE = "the model sent no text and no tool call — no work turn started, countdown restarted";
+
 export const STATUS_KEY = "watchdog";

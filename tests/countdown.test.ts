@@ -115,6 +115,44 @@ it("status detail: counting down / typing pause / key pause / waiting for idle",
 	expect(rt.notifications.some((n) => n.msg.includes("waiting for the AI to go idle"))).toBe(true);
 });
 
+it("a countdown that runs out while the session is busy re-arms the moment it goes idle", async () => {
+	const rt = await setup();
+	await rt.commands.get("watchdog").handler("timeout=1 message=busy poll", rt.ctx);
+	await rt.settleAfterRun(); // run ends → countdown
+
+	// The timer runs out while the AI is running: nothing is sent, and no timer is left behind.
+	rt.state.idle = false;
+	await vi.advanceTimersByTimeAsync(1100);
+	expect(nudgeMessages(rt)).toHaveLength(0);
+
+	// The ticker notices the idle session and starts a fresh, full countdown instead of nudging at once.
+	rt.state.idle = true;
+	await vi.advanceTimersByTimeAsync(1100);
+	expect(nudgeMessages(rt)).toHaveLength(0);
+	await vi.advanceTimersByTimeAsync(1100);
+	expect(nudgeMessages(rt)).toHaveLength(1);
+
+	await rt.commands.get("watchdog").handler("stop", rt.ctx);
+});
+
+it("a stale ctx while sending the check stops monitoring instead of leaving a half-open window", async () => {
+	const rt = await setup();
+	await rt.commands.get("watchdog").handler("timeout=1 max=3", rt.ctx);
+	await rt.settleAfterRun();
+
+	// pi throws synchronously when the session was replaced; every later call on that ctx throws too.
+	rt.pi.sendMessage = () => {
+		throw new Error("This extension ctx is stale after session replacement or reload.");
+	};
+	await vi.advanceTimersByTimeAsync(1100);
+
+	await rt.commands.get("watchdog").handler("status", rt.ctx);
+	expect(rt.notifications.some((n) => n.msg.includes("not running"))).toBe(true); // stopped, not limping
+
+	// No half-open decision window: the next turn must not have its tools blocked.
+	expect(await rt.emitToolCall({ toolName: "bash", toolCallId: "c1", args: {} })).toBeUndefined();
+});
+
 it("re-running /watchdog while running: resets args, text and nudge count, no stale countdown", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1 max=5 message=old text", rt.ctx);

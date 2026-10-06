@@ -8,7 +8,7 @@ import { expandedCardIds, expandedHintIds } from "./expanded.ts";
  */
 export interface DecisionCardData {
 	exchangeId: string;
-	outcome: "continue" | "stop" | "superseded" | "failed";
+	outcome: "continue" | "stop" | "superseded" | "failed" | "empty";
 	/** AI reply from the decision turn (truncated); text from blocked tool calls also lands here. */
 	reply?: string;
 	/** outcome=stop in keep mode: monitoring only paused, the next user message resumes it. */
@@ -25,7 +25,8 @@ const OUTCOME_LABEL: Record<DecisionCardData["outcome"], string> = {
 	continue: "still working",
 	stop: "stopped on purpose",
 	superseded: "superseded",
-	failed: "check failed, retrying",
+	failed: "check failed, will retry",
+	empty: "empty reply from model",
 };
 
 /**

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { DECISION_ENTRY_TYPE, FOLD_MESSAGE_TYPE } from "../src/constants.ts";
+import { DECISION_ENTRY_TYPE, EMPTY_REPLY_NOTE, FOLD_MESSAGE_TYPE } from "../src/constants.ts";
 import type { DecisionCardData } from "../src/decision-card.ts";
 import { continuationMessages, nudgeMessages, setup } from "./helpers/setup.js";
 
@@ -25,7 +25,7 @@ async function failDecisionTurn(rt: Awaited<ReturnType<typeof setup>>, errorMess
 	await rt.emit("agent_settled");
 }
 
-it("a decision turn killed by a provider error is retried: a fresh check is sent and counted", async () => {
+it("a decision turn killed by a provider error is retried by the next countdown, not on the spot", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1 max=3 message=retry test", rt.ctx);
 	await rt.settleAfterRun();
@@ -34,16 +34,18 @@ it("a decision turn killed by a provider error is retried: a fresh check is sent
 
 	await failDecisionTurn(rt);
 
-	expect(nudgeMessages(rt)).toHaveLength(2); // retried right away, no new countdown
+	// No immediate retry: the check failed, so the countdown starts again and the status bar counts.
+	expect(nudgeMessages(rt)).toHaveLength(1);
 	expect(continuationMessages(rt)).toHaveLength(0); // a failed check never continues
+	expect(rt.statusBars.get("watchdog")).toContain("1s");
 
-	// The retry is a check like any other: it draws its own nudge from the max= budget.
+	await vi.advanceTimersByTimeAsync(1100); // check 2, spending the next nudge from the max= budget
+	expect(nudgeMessages(rt)).toHaveLength(2);
 	await rt.commands.get("watchdog").handler("status", rt.ctx);
 	expect(rt.notifications.some((n) => n.msg.includes("nudged 2/3"))).toBe(true);
 
 	// The retried check answers normally → continue message, so work resumes.
-	await rt.emitMessageEnd({ role: "assistant", content: [{ type: "text", text: "still going" }] });
-	await rt.settleAfterRun();
+	await rt.settleAfterRun({ role: "assistant", content: [{ type: "text", text: "still going" }] });
 	expect(continuationMessages(rt)).toHaveLength(1);
 	expect(cards(rt).map((c) => c.outcome)).toEqual(["failed", "continue"]);
 
@@ -64,7 +66,9 @@ it("a failed check drops a history card carrying the provider error, and folds t
 
 	await failDecisionTurn(rt, "boom: connection reset");
 
-	// max=1 is already spent, so the retry cannot be sent: monitoring stops like any other cap hit.
+	// The budget is already spent, so the next countdown cannot send anything: it auto-stops instead.
+	expect(nudgeMessages(rt)).toHaveLength(1);
+	await vi.advanceTimersByTimeAsync(1100);
 	expect(nudgeMessages(rt)).toHaveLength(1);
 	expect(rt.notifications.some((n) => n.msg.includes("auto-stopped"))).toBe(true);
 
@@ -78,6 +82,59 @@ it("a failed check drops a history card carrying the provider error, and folds t
 	expect(rt.customMessages.some((m) => m.customType === FOLD_MESSAGE_TYPE && m.details.outcome === "failed")).toBe(
 		true,
 	);
+});
+
+it("an empty reply is treated like a failed check: card, fold marker, countdown, no work turn", async () => {
+	const rt = await setup();
+	await rt.commands.get("watchdog").handler("timeout=1 max=3 message=silent model", rt.ctx);
+	await rt.settleAfterRun();
+	await vi.advanceTimersByTimeAsync(1100); // check 1
+
+	// The provider finished the stream with no text and no tool call at all.
+	await rt.settleAfterRun({ role: "assistant", content: [], stopReason: "stop" });
+
+	expect(nudgeMessages(rt)).toHaveLength(1);
+	expect(continuationMessages(rt)).toHaveLength(0); // silence is not "work remains"
+	expect(cards(rt)[0]).toMatchObject({ outcome: "empty", reply: EMPTY_REPLY_NOTE });
+	expect(rt.customMessages.some((m) => m.customType === FOLD_MESSAGE_TYPE && m.details.outcome === "empty")).toBe(true);
+	// The check still folds away, and the status bar went back to counting the same nudge budget.
+	const folded = (await rt.emitContext(rt.currentMessages())) as any[];
+	expect(folded).toHaveLength(0);
+	expect(rt.statusBars.get("watchdog")).toContain("1s");
+	expect(rt.statusBars.get("watchdog")).toContain("1/3");
+
+	await vi.advanceTimersByTimeAsync(1100); // check 2
+	expect(nudgeMessages(rt)).toHaveLength(2);
+
+	// Two empty replies in a row still never start a work turn; they just drain the budget.
+	await rt.settleAfterRun({ role: "assistant", content: [], stopReason: "stop" });
+	expect(continuationMessages(rt)).toHaveLength(0);
+	expect(cards(rt).map((c) => c.outcome)).toEqual(["empty", "empty"]);
+
+	await vi.advanceTimersByTimeAsync(1100); // check 3, the third and last allowed nudge
+	await rt.settleAfterRun({ role: "assistant", content: [], stopReason: "stop" });
+	await vi.advanceTimersByTimeAsync(1100); // cap hit: no check 4
+	expect(rt.notifications.some((n) => n.msg.includes("auto-stopped"))).toBe(true);
+	expect(continuationMessages(rt)).toHaveLength(0);
+});
+
+it("a decision turn whose only output is a blocked tool call is not an empty reply", async () => {
+	const rt = await setup();
+	await rt.commands.get("watchdog").handler("timeout=1 max=3 message=tool only", rt.ctx);
+	await rt.settleAfterRun();
+	await vi.advanceTimersByTimeAsync(1100); // check 1
+
+	// The model tried to work instead of answering; the call is blocked, so there is no text either.
+	await rt.settleAfterRun({
+		role: "assistant",
+		content: [{ type: "toolCall", id: "c1", name: "bash", arguments: {} }],
+		stopReason: "toolUse",
+	});
+
+	expect(cards(rt)[0]).toMatchObject({ outcome: "continue" });
+	expect(continuationMessages(rt)).toHaveLength(1);
+
+	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });
 
 it("a failed check the user took over is superseded, not retried", async () => {

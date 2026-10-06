@@ -178,14 +178,24 @@ export function createMockRuntime() {
 		for (const l of inputListeners) l("x");
 	};
 
-	/** Simulate a finished run: go idle and fire agent_settled, so the watchdog counts down again. */
-	const settleAfterRun = async () => {
+	/**
+	 * Simulate a finished run: go idle and fire agent_settled, so the watchdog counts down again.
+	 * Pass the assistant message the run produced when a test needs a specific reply (text, tool call,
+	 * or nothing at all). The default is a plain text answer that ends the decision turn with "continue".
+	 */
+	const settleAfterRun = async (message?: any) => {
 		entrySeq += 1;
 		const entry: any = { type: "message", id: `s${entrySeq}` };
 		sessionEntries.push(entry); // this run produced one session message
 		setLeaf(entry.id);
-		// Like real pi: a clean assistant message ends with stopReason "stop".
-		await emit("agent_end", { messages: [{ role: "assistant", content: [], stopReason: "stop" }] });
+		// Like real pi: the run's assistant message is saved first, then the run ends.
+		const assistant = message ?? {
+			role: "assistant",
+			content: [{ type: "text", text: "still working" }],
+			stopReason: "stop",
+		};
+		await emitMessageEnd(assistant);
+		await emit("agent_end", { messages: [assistant] });
 		idle = true;
 		await emit("agent_settled");
 	};

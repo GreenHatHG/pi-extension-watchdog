@@ -25,6 +25,7 @@ import {
 	DECISION_REPLY_MAX_CHARS,
 	DEFAULT_MAX_NUDGES,
 	DEFAULT_TIMEOUT_SECONDS,
+	EMPTY_REPLY_NOTE,
 	FOLD_MESSAGE_TYPE,
 	STATUS_KEY,
 	STOP_MESSAGE_TYPE,
@@ -47,6 +48,8 @@ interface DecisionWindow {
 	failed?: boolean;
 	/** Provider error text from that failure, kept for the history card. */
 	failureMessage?: string;
+	/** The turn emitted a tool call (even a blocked one), so "no text" is not the same as "no answer". */
+	sawToolCall?: boolean;
 }
 
 interface WatchdogState {
@@ -69,6 +72,11 @@ interface WatchdogState {
 	lastInputAt: number;
 	/** User hit ESC on the last run: skip this idle spell, clear on their next real message. */
 	interrupted: boolean;
+	/**
+	 * The countdown ran out while the session was busy: another run (agent_settled re-arms us), or pi
+	 * compacting, which never fires agent_settled at all. The ticker re-arms the countdown once idle.
+	 */
+	waitingForIdle: boolean;
 	timer: ReturnType<typeof setTimeout> | null;
 	ticker: ReturnType<typeof setInterval> | null;
 }
@@ -88,6 +96,7 @@ const state: WatchdogState = {
 	pausedByActivity: false,
 	lastInputAt: 0,
 	interrupted: false,
+	waitingForIdle: false,
 	timer: null,
 	ticker: null,
 };
@@ -267,6 +276,7 @@ function onMessageEnd(event: MessageEndEvent) {
 	const hasToolCall =
 		Array.isArray(content) &&
 		content.some((block) => isRecord(block) && (block.type === "toolCall" || block.type === "tool_use"));
+	if (hasToolCall) decisionWindow.sawToolCall = true;
 	const text = textFromContent(content);
 	if (text) decisionWindow.replyText = text.slice(0, DECISION_REPLY_MAX_CHARS);
 	return {
@@ -286,17 +296,12 @@ async function onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext) 
 		// A decision turn is void (superseded) when the user jumped in, the turn isn't idle, or ESC hit.
 		// We must still drop a terminal marker, or the "keep until a marker" rule makes the decision prompt stick forever.
 		const superseded = !ctx.isIdle() || ctx.hasPendingMessages() || window.aborted === true;
-		// A check that died on a provider error never answered: retry it as a fresh check. That spends
-		// one nudge from the same max= budget as any other check (sendDecision caps and auto-stops).
-		const retry = state.running && window.failed === true && !window.stopCalled && !superseded;
-		const outcome: DecisionCardData["outcome"] = window.stopCalled
-			? "stop"
-			: superseded
-				? "superseded"
-				: window.failed === true
-					? "failed"
-					: "continue";
-		if (window.stopCalled || superseded || retry) {
+		const outcome = decisionOutcome(window, superseded);
+		// A check that never answered (provider error, or an empty reply) is retried by the next
+		// countdown, not on the spot: the timer re-arms and that check spends the next nudge from the
+		// same max= budget (sendDecision caps and auto-stops).
+		const rearm = state.running && (outcome === "failed" || outcome === "empty");
+		if (outcome === "stop" || outcome === "superseded" || rearm) {
 			pi.sendMessage(
 				{
 					customType: FOLD_MESSAGE_TYPE,
@@ -324,26 +329,21 @@ async function onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext) 
 		}
 		// History record only: it gets a TUI renderer and stays for reading back, but never enters the model context.
 		// One entry per exchange, holding whatever the turn said. A stop leaves no reply, since the reply is cleared
-		// before it is saved and the wrap-up text ran before the tool call. A failed check keeps the provider error.
+		// before it is saved and the wrap-up text ran before the tool call. A failed check keeps the provider error;
+		// an empty check has no reply to keep, so the card explains the silence instead.
 		pi.appendEntry<DecisionCardData>(DECISION_ENTRY_TYPE, {
 			exchangeId: window.exchangeId,
 			outcome,
-			reply: window.replyText ?? (window.failureMessage || undefined),
+			reply: window.replyText ?? (outcome === "empty" ? EMPTY_REPLY_NOTE : window.failureMessage || undefined),
 			suspended: outcome === "stop" && state.suspended,
 			nudgeCount: state.nudgeCount,
 			maxNudges: state.maxNudges,
 			ts: Date.now(),
 		});
-		if (retry) {
-			// Fresh check is on its way; no countdown, since the AI is running again.
-			// If sendDecision hit the cap it tore monitoring down, so don't read the status bar afterwards.
-			sendDecision(ctx);
-			return;
-		}
 	}
 	if (!state.running) return;
 	activeCtx = ctx;
-	armCountdown(ctx); // Retries and queued turns are done, so count down again.
+	armCountdown(ctx); // Queued turns and failed/empty checks are done, so count down again.
 }
 
 /**
@@ -406,6 +406,8 @@ function clearCountdown() {
 		state.timer = null;
 	}
 	state.countdownDeadline = null;
+	// Any fresh arming replaces the wait; the flag only ever means "the timer already ran out once".
+	state.waitingForIdle = false;
 }
 
 /** Unsent text in the editor means the user is typing by hand. */
@@ -536,6 +538,27 @@ function teardown(ctx?: ExtensionContext, force = true, publish = true) {
 	if (publish) publishState();
 }
 
+/**
+ * Stop for real without touching the ctx. On a stale ctx every ui call throws too, so a shutdown that
+ * cleans the status line cannot be used here; clearing the state is all we can honestly do.
+ */
+function stopWithoutCtx() {
+	state.running = false;
+	state.suspended = false;
+	state.pausedByInput = false;
+	state.pausedByActivity = false;
+	state.interrupted = false;
+	clearCountdown();
+	if (state.ticker) {
+		clearInterval(state.ticker);
+		state.ticker = null;
+	}
+	if (unsubTerminalInput) {
+		unsubTerminalInput();
+		unsubTerminalInput = null;
+	}
+}
+
 /** Wake a paused keep-mode watchdog: keep the old settings, reset the nudge count. */
 function resumeWatchdog(ctx: ExtensionContext) {
 	if (!state.suspended || state.running) return;
@@ -614,7 +637,12 @@ function armCountdown(ctx: ExtensionContext) {
 async function fireNudge(ctx: ExtensionContext) {
 	state.countdownDeadline = null;
 	if (!state.running) return;
-	if (!ctx.isIdle()) return; // AI started running again; agent_settled will re-arm.
+	if (!ctx.isIdle()) {
+		// Busy right now: another run (its agent_settled re-arms us), or pi compacting, which never fires
+		// agent_settled at all. Don't drop the idle spell; the ticker re-arms once the session is idle.
+		state.waitingForIdle = true;
+		return;
+	}
 	if (editorHasText(ctx)) {
 		// Race guard: user is typing but the ticker hasn't paused us yet.
 		state.pausedByInput = true;
@@ -658,9 +686,12 @@ function sendDecision(ctx: ExtensionContext): boolean {
 			{ triggerTurn: true, deliverAs: "steer" },
 		);
 	} catch {
-		// Race: the AI started the moment we sent it, so don't count this nudge and wait for agent_settled.
+		// Only a stale ctx throws here: pi swallows async send failures itself, a replaced session makes
+		// every pi and ctx call throw. Staying alive would leave a half-open decision window that blocks
+		// every tool in the next turn, so stop for real, touching neither the UI nor the event bus.
 		decisionWindow = null;
-		state.nudgeCount--;
+		state.nudgeCount--; // the message never went out, so it does not spend a nudge
+		stopWithoutCtx();
 		return false;
 	}
 	renderStatus(ctx);
@@ -736,6 +767,19 @@ function runWasAborted(messages: unknown): boolean {
 }
 
 /**
+ * What a finished check settled on, most specific first: an answer, a turn the user took over, a dead
+ * request, silence, or work remains. A provider error outranks silence, since an errored turn is empty too.
+ */
+function decisionOutcome(window: DecisionWindow, superseded: boolean): DecisionCardData["outcome"] {
+	if (window.stopCalled) return "stop";
+	if (superseded) return "superseded";
+	if (window.failed === true) return "failed";
+	// No text and no tool block means the check came back silent; a tool block (even a blocked one) is an answer.
+	if (window.replyText === undefined && window.sawToolCall !== true) return "empty";
+	return "continue";
+}
+
+/**
  * Provider error text when the run died on one, or undefined when it ended any other way.
  * Pi emits agent_end once per internal retry attempt, so the newest assistant message decides:
  * a later successful attempt clears the earlier error.
@@ -765,6 +809,11 @@ function startTicker() {
 	if (state.ticker) clearInterval(state.ticker);
 	state.ticker = setInterval(() => {
 		if (!state.running || !activeCtx) return;
+		if (state.waitingForIdle) {
+			// The countdown ran out while the session was busy; start a fresh one the moment it is idle.
+			if (activeCtx.isIdle()) armCountdown(activeCtx);
+			return;
+		}
 		if (state.countdownDeadline != null) {
 			if (editorHasText(activeCtx) || userActive()) {
 				const byText = editorHasText(activeCtx);

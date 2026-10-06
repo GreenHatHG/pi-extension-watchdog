@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { DECISION_ENTRY_TYPE, DECISION_MESSAGE, DECISION_MESSAGE_TYPE } from "../src/constants.ts";
+import { DECISION_ENTRY_TYPE, DECISION_MESSAGE, DECISION_MESSAGE_TYPE, EMPTY_REPLY_NOTE } from "../src/constants.ts";
 import type { DecisionCardData } from "../src/decision-card.ts";
 import { nudgeMessages, setup } from "./helpers/setup.js";
 
@@ -60,8 +60,7 @@ it("outcome continue drops one card with the AI reply", async () => {
 	// The check hint is the visible nudge message; the result entry is a history record.
 	expect(nudgeMessages(rt)[0]?.display).toBe(true);
 
-	await rt.emitMessageEnd({ role: "assistant", content: [{ type: "text", text: "still working on it" }] });
-	await rt.settleAfterRun(); // settle → continue
+	await rt.settleAfterRun({ role: "assistant", content: [{ type: "text", text: "still working on it" }] }); // settle → continue
 
 	const found = cards(rt);
 	expect(found).toHaveLength(1);
@@ -84,14 +83,14 @@ it("when the AI calls stop_watchdog the card says stopped on purpose and keeps t
 	expect(cards(rt)).toHaveLength(0);
 
 	// Extra text in the same message as the tool call lands in that entry, not a second one.
-	await rt.emitMessageEnd({
+	await rt.settleAfterRun({
 		role: "assistant",
 		content: [
 			{ type: "text", text: "all done" },
 			{ type: "toolCall", id: "cs", name: "stop_watchdog", arguments: {} },
 		],
-	});
-	await rt.settleAfterRun(); // settle → stop
+		stopReason: "toolUse",
+	}); // settle → stop
 
 	const found = cards(rt);
 	expect(found).toHaveLength(1);
@@ -119,8 +118,7 @@ it("a very long AI reply is cut to the cap before saving", async () => {
 	await vi.advanceTimersByTimeAsync(1100);
 
 	const long = "x".repeat(400);
-	await rt.emitMessageEnd({ role: "assistant", content: [{ type: "text", text: long }] });
-	await rt.settleAfterRun();
+	await rt.settleAfterRun({ role: "assistant", content: [{ type: "text", text: long }] });
 
 	const found = cards(rt);
 	expect(found[0].reply).toHaveLength(300);
@@ -204,6 +202,29 @@ it("the card shows the stop outcome, a paused note in keep mode, and a reply onl
 		.render(80)
 		.join("\n");
 	expect(withReply).toContain("click to expand");
+});
+
+it("an empty reply renders its own outcome and explains itself when expanded", async () => {
+	const rt = await setup();
+	const data: DecisionCardData = {
+		exchangeId: "w1",
+		outcome: "empty",
+		reply: EMPTY_REPLY_NOTE,
+		nudgeCount: 1,
+		maxNudges: 50,
+		ts: 0,
+	};
+
+	// The row must not claim the model is "still working": it said nothing at all.
+	const collapsed = cardView(rt, data).render(80).join("\n");
+	expect(collapsed).toContain("empty reply from model");
+	expect(collapsed).not.toContain("still working");
+	expect(collapsed).toContain("click to expand");
+	expect(collapsed).not.toContain(EMPTY_REPLY_NOTE);
+
+	// Width 200 keeps the note on one line, so the assertion is about content, not wrapping.
+	const expanded = cardView(rt, data, "e1", true).render(200).join("\n");
+	expect(expanded).toContain(EMPTY_REPLY_NOTE);
 });
 
 it("a proactive stop card names the missing check instead of making one up", async () => {
