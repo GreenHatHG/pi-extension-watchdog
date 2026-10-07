@@ -5,6 +5,7 @@ import {
 	DECISION_MESSAGE_TYPE,
 	DECISION_NOTE_MAX_CHARS,
 	EMPTY_REPLY_NOTE,
+	NOT_IN_CHECK_TURN_NOTE,
 } from "../src/constants.ts";
 import type { DecisionCardData } from "../src/decision-card.ts";
 import { nudgeMessages, setup } from "./helpers/setup.js";
@@ -172,6 +173,12 @@ it("the decision prompt names watchdog_decide as the only allowed tool, so it do
 	expect(DECISION_MESSAGE).toContain("every tool except watchdog_decide is blocked");
 });
 
+it("a continue answer outside a check is refused by naming the state, not by denying the check exists", () => {
+	// The model has just answered a check, so "no check is open" reads as if the check vanished; naming
+	// the state (already answered) is what lets it move on into the work turn it was just given.
+	expect(NOT_IN_CHECK_TURN_NOTE).toContain("already answered");
+});
+
 it("the decision prompt says text is not an answer and names the three decisions", () => {
 	// The check turn reads exactly one signal: the tool call. Saying so out loud is what stops the model
 	// from writing its delivery into a channel that folds away, and gives "work remains" a real action.
@@ -181,6 +188,14 @@ it("the decision prompt says text is not an answer and names the three decisions
 	expect(DECISION_MESSAGE).toContain('"wait_user" if you are waiting on a user decision');
 	// A model that answers "continue" must know the work happens next turn, not now.
 	expect(DECISION_MESSAGE).toContain("This turn never does work");
+});
+
+it("the decision prompt says a delivered answer is delivered and a rewrite is not work", () => {
+	// The failure this pins: the model ended its turn on its own (a normal stop, not an interruption),
+	// read that ending as "my report never went out", answered "continue", and re-sent a longer copy.
+	expect(DECISION_MESSAGE).toContain("ending is not an interruption");
+	expect(DECISION_MESSAGE).toContain("counts as delivered");
+	expect(DECISION_MESSAGE).toContain("not work");
 });
 
 it("in fullscreen the hint expands on click and collapses on a second click", async () => {

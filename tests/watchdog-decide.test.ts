@@ -101,10 +101,27 @@ it("calling watchdog_decide with 'continue' outside a check turn says there is n
 
 	await expect(
 		rt.tools.get(TOOL_NAME).execute("t1", { decision: "continue" }, undefined, undefined, rt.ctx),
-	).rejects.toThrow("No watchdog check is open");
+	).rejects.toThrow("already answered");
 	expect(rt.state.abortedTurns).toBe(0); // nothing was stopped or aborted
 	await rt.commands.get("watchdog").handler("status", rt.ctx);
 	expect(rt.notifications.some((n) => n.msg.includes("running"))).toBe(true);
+});
+
+it("the continue message says the check is over, so the model stops answering it", async () => {
+	const rt = await setup();
+	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx);
+	await rt.settleAfterRun();
+
+	await vi.advanceTimersByTimeAsync(1100); // check turn opens
+	await rt.settleAfterRun(); // answered continue → continuation message goes out
+	const continuation = continuationMessages(rt)[0] as { content: string };
+
+	// The check state is not represented anywhere else: a model that misses the close keeps calling
+	// watchdog_decide inside the work turn (and gets the "already answered" note as a slap).
+	expect(continuation.content).toContain("check is over");
+	expect(continuation.content).toContain("every tool available");
+
+	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });
 
 it("the tool description and system-prompt hooks carry the same answers as the check prompt", async () => {

@@ -2,9 +2,12 @@ export const DEFAULT_TIMEOUT_SECONDS = 60;
 export const DEFAULT_MAX_NUDGES = 50;
 /** Nudge trigger line; message= only adds to it, never replaces it. */
 export const DEFAULT_MESSAGE =
-	"[Automated, not user input] If work remains, continue working (no reply needed). " +
+	"[Automated, not user input] Your watchdog check is over and this is a normal work turn with every tool available — you are not answering a check now. " +
+	"If work remains, continue working (no reply needed). " +
 	// "Don't restate" is here on purpose: without it, "state what you need" reads as an invitation to
 	// repeat a finished report, and that repeat lands after the fold range, so it stays in context forever.
+	// The "check is over" opener is here for the same reason one step earlier: a model that never learned the
+	// check closed keeps answering it (a second watchdog_decide, "I'm in a check turn") instead of working.
 	"If waiting on a user decision, don't change code — state what you need in one line, don't restate an answer you already delivered, then call watchdog_decide with decision \"wait_user\" as your final action. " +
 	'If no work remains and no decision is pending, call watchdog_decide with decision "done" to end the turn.';
 
@@ -20,6 +23,11 @@ export function continuationText(hint?: string): string {
  * prompt says so, because the old "any text reply means work remains" mapping made the model write its
  * delivery into a channel the watchdog folds away — the more care it put in the text, the more got
  * deleted, and a model that wanted to keep working had no legitimate call to make but the stop one.
+ *
+ * The "restating is not work" clause answers a check the model got wrong in practice: a turn that already
+ * delivered an answer (or that ended on its own with stopReason "stop") was read as interrupted, so the
+ * model answered "continue" to write the very answer it had just sent. A rewrite is not progress, and
+ * "wait_user" is only for being blocked — not for parking a finished task.
  */
 export const DECISION_MESSAGE =
 	"[Automated, not user input] Watchdog check — every tool except watchdog_decide is blocked in this turn. " +
@@ -27,6 +35,8 @@ export const DECISION_MESSAGE =
 	'or "wait_user" if you are waiting on a user decision. ' +
 	"Do not answer with text — a check turn that calls nothing is treated as no answer and the countdown starts over. " +
 	'This turn never does work: if you answer "continue", the work happens in the next turn. ' +
+	"Your previous turn ending is not an interruption, and an answer you already wrote counts as delivered: " +
+	'restating, expanding or re-formatting it is not work, so answer "done" if nothing is left to do. ' +
 	"The optional note is one short line for the user, never a report.";
 
 /** How long after the last key press we still treat the user as busy, so we hold the countdown. */
@@ -70,8 +80,8 @@ export const TOOL_PROMPT_GUIDELINES = [
 
 /** Returned when the tool is called outside a check turn to say "keep going": there is nothing to answer there. */
 export const NOT_IN_CHECK_TURN_NOTE =
-	`No watchdog check is open, so "${DECISION_CONTINUE}" means nothing here. Just keep working. ` +
-	`Use "${DECISION_DONE}" or "${DECISION_WAIT_USER}" only when you are truly finished or waiting on the user.`;
+	`The watchdog check is already answered and closed — "${DECISION_CONTINUE}" means nothing here. ` +
+	`Just keep working. Use "${DECISION_DONE}" or "${DECISION_WAIT_USER}" only when you are truly finished or waiting on the user.`;
 
 /**
  * Decision message: shown as the collapsed check hint in the TUI (click to expand the prompt),

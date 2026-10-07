@@ -118,13 +118,17 @@ AI 停止输出、进入空闲后开始倒计时；倒计时期间 AI 再次运�
 
   文字回答不再算答案（`decisionOutcome` 只读工具调用）：只写文字、没调工具的检查落成 `empty`——写卡片、发折叠标记、不发继续消息、重新倒计时，并且照样扣一次 `max` 名额。这么设计是因为旧协议里「文字 = 还有活」让模型把真正的交付物写进了会被折叠掉的通道，写得越认真删得越干净，而且它想接着干活时没有任何正当工具可调，只能去撞被拦截的工具、撞不明白就按唯一出口停止。
 
+  决策提示还明说两件事（都是实测撞出来的）：**上一回合自己结束不算被中断，已经写出来的回答就算交付过了**，重写 / 扩写 / 换排版都不算「还有活」——否则模型会因为「我的报告好像没发出去」而答 `continue`，再把同一份报告写一遍（长在折叠区间**之外**，永久留在上下文里）。
+
   每次检查的结果以 `pi-watchdog:decision` 的 `appendEntry` 存进会话历史（继续 / AI 主动停止 / 用户接管作废 / 检查失败 / 没调工具 + `note` 或错误原文，`note` 截断 `DECISION_NOTE_MAX_CHARS`＝200 字符），它在时间线上占一行折叠摘要——`⏱ watchdog: still working · click to expand` / `⏱ watchdog: finished — stopped on purpose` / `⏱ watchdog: waiting on you — reply to resume` / `⏱ watchdog: superseded` / `⏱ watchdog: check failed, will retry` / `⏱ watchdog: no watchdog_decide call from model`，点击展开就是 AI 传给 `note` 的那句短话（失败那张是 provider 报错原文，没调工具那张是一句说明）。它不进模型上下文。常驻模式下 AI 主动停止时会多标一句 `· monitoring paused`。
 
   先调 `watchdog_decide` 的那次检查没有 note 可看：那一轮的工具调用之后没有后续输出，所以没有短话可存（`superseded` 同理，它的含义是整张卡作废）。这种卡片只显示结果；`failed` 那张显示的是报错原文，`empty` 那张显示的是那句「没调工具」以及它为什么算没答。
 
   `watchdog_decide` 不只在决策回合可调：AI 真正完工（或只在等你决策）时，可以不等倒计时、在工作回合末尾直接调用它（`decision: "done"` 或 `"wait_user"`；在工作回合里调 `continue` 会被当成错误退回并提醒它继续干活），省掉一次「干等 timeout + 空决策往返」。这时监控同样停止（常驻模式下则挂起）。这条路径没有决策回合，也就没有前两类卡片可看，所以它单独写一张结果卡片——`⏱ watchdog: stopped on purpose · monitoring paused · no check`（后两截按实际情况出现：普通模式没有 `monitoring paused`，两者拼在一起时才最全）。卡片只说明「谁停的、为什么没有检查回合」，没有可展开的回复，和检查里判定停止的那张一样。
 - **继续消息**：决策结果为「继续」时才发出，是真正触发工作回合的那条。固定触发行 + 可选追加指令：
-  > [Automated, not user input] If work remains, continue working (no reply needed). If waiting on a user decision, don't change code — state what you need in one line, don't restate an answer you already delivered, then call watchdog_decide as your final action. If no work remains and no decision is pending, call watchdog_decide to end the turn.
+  > [Automated, not user input] Your watchdog check is over and this is a normal work turn with every tool available — you are not answering a check now. If work remains, continue working (no reply needed). If waiting on a user decision, don't change code — state what you need in one line, don't restate an answer you already delivered, then call watchdog_decide with decision "wait_user" as your final action. If no work remains and no decision is pending, call watchdog_decide with decision "done" to end the turn.
+
+  开头那句「check is over」是实测补上的：检查是否还开着这个状态**只存在于提示词里**（`decisionWindow` 是插件进程内的状态，模型看不到）。错过它的模型会在工作回合里再次调 `watchdog_decide(decision="continue")`，拿回一句「已经答过了」，然后以为还在检查回合、把刚交付过的回答再写一遍。这句话让回合边界在带内可见。
 
   它按「AI 为什么停下」分三种情况给出对应动作：还有活就继续干（无需回复）；在等用户决策就不改代码，一行说明需要什么后用 `watchdog_decide(decision="wait_user")` 收尾（不要复述已经交付过的答案）；没活也没待决策就调 `watchdog_decide(decision="done")` 结束回合。开头的 `[Automated, not user input]` 前缀让 AI 知道这不是真用户发言，不会把它当成新的用户指令。
 - **追加指令**：可选。`message=` 设置的文案不会替换触发行，而是作为 `Task instruction` 追加在继续消息之后，保证自定义文案不会丢失触发行「继续干活 / 等决策时说明需求 / 主动停止」的核心语义。
