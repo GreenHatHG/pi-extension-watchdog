@@ -141,7 +141,7 @@ it("ESC on the decision turn → no continue message, the card says superseded, 
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });
 
-it("ESC after a user interjection during the decision turn → warns the interjection may be lost, and sends no continue message", async () => {
+it("ESC after a user interjection during the decision turn → offers a resend, and sends no continue message", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1 message=interject abort", rt.ctx);
 	await rt.settleAfterRun();
@@ -158,20 +158,21 @@ it("ESC after a user interjection during the decision turn → warns the interje
 	rt.state.idle = true;
 	await rt.emit("agent_settled");
 
-	expect(rt.notifications.some((n) => n.msg.includes("may have been dropped"))).toBe(true);
+	expect(rt.notifications.some((n) => n.msg.includes("got no answer"))).toBe(true);
 	expect(continuationMessages(rt)).toHaveLength(0);
 
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });
 
-it("the abort from stop_watchdog itself is not treated as a user ESC stop", async () => {
+it("the turn watchdog_decide ends is not read as a user ESC stop", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=60 message=self-stop test", rt.ctx);
 	await rt.settleAfterRun();
 
-	// teardown runs before the abort inside the tool: after stop_watchdog, running=false
-	await rt.tools.get("stop_watchdog").execute("t1", {}, undefined, undefined, rt.ctx);
-	await rt.settleAbortedTurn(); // the agent_end triggered by the tool's abort
+	// The tool ends the turn with terminate and teardown runs first: running=false, no abort, no ESC row.
+	await rt.tools.get("watchdog_decide").execute("t1", { decision: "done" }, undefined, undefined, rt.ctx);
+	expect(rt.state.abortedTurns).toBe(0);
+	await rt.settleAfterRun(); // the run's own agent_end/agent_settled
 
 	rt.notifications.length = 0;
 	await rt.commands.get("watchdog").handler("status", rt.ctx);

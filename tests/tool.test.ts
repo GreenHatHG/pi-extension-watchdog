@@ -15,22 +15,24 @@ afterEach(() => {
 	vi.useRealTimers();
 });
 
-it("the AI calls stop_watchdog (once mode) → fully stop, and the tool stays registered", async () => {
+it("the AI calls watchdog_decide (once mode) → fully stop, and the tool stays registered", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1 message=tool test", rt.ctx);
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1100); // decision turn
 	expect(nudgeMessages(rt)).toHaveLength(1);
 
-	// the AI calls stop_watchdog during the decision turn: the outcome is stop
-	const result = await rt.tools.get("stop_watchdog").execute("t1", {}, undefined, undefined, rt.ctx);
+	// the AI calls watchdog_decide during the decision turn: the outcome is stop
+	const result = await rt.tools
+		.get("watchdog_decide")
+		.execute("t1", { decision: "done" }, undefined, undefined, rt.ctx);
 	expect(JSON.stringify(result.content)).toContain("OK.");
 
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1300);
 	expect(continuationMessages(rt)).toHaveLength(0); // no continue message after a stop
 	expect(nudgeMessages(rt)).toHaveLength(1); // and no new decision turn either
-	expect(rt.activeTools.has("stop_watchdog")).toBe(true); // registered for good, no longer removed on start/stop
+	expect(rt.activeTools.has("watchdog_decide")).toBe(true); // registered for good, no longer removed on start/stop
 });
 
 it("a proactive stop is recorded once its run settles, card and fold marker both after the wrap-up", async () => {
@@ -39,7 +41,7 @@ it("a proactive stop is recorded once its run settles, card and fold marker both
 	rt.state.idle = false; // AI is mid-run; no decision window is open
 	expect(cards(rt)).toHaveLength(0);
 
-	await rt.tools.get("stop_watchdog").execute("t1", {}, undefined, undefined, rt.ctx);
+	await rt.tools.get("watchdog_decide").execute("t1", { decision: "done" }, undefined, undefined, rt.ctx);
 	// Nothing yet: the wrap-up text queued behind the tool call has to land inside the folded range first.
 	expect(cards(rt)).toHaveLength(0);
 	expect(rt.customMessages.filter((m) => m.customType === STOP_MESSAGE_TYPE)).toHaveLength(0);
@@ -60,7 +62,7 @@ it("a check whose answer is stop writes the card at settle, not at the tool call
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1100); // decision window opens
 
-	await rt.tools.get("stop_watchdog").execute("t1", {}, undefined, undefined, rt.ctx);
+	await rt.tools.get("watchdog_decide").execute("t1", { decision: "done" }, undefined, undefined, rt.ctx);
 	expect(cards(rt)).toHaveLength(0); // nothing yet: the turn may still say a closing line
 
 	await rt.settleAfterRun();
@@ -70,25 +72,19 @@ it("a check whose answer is stop writes the card at settle, not at the tool call
 	expect(found[0]?.proactive).toBeUndefined();
 });
 
-it("calling stop_watchdog proactively, before any nudge, stops monitoring and clears the abort phantom error", async () => {
+it("calling watchdog_decide proactively, before any nudge, stops monitoring by ending the turn", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=60", rt.ctx);
 	rt.state.idle = false; // AI is mid-run; no decision window is open
 
-	const result = await rt.tools.get("stop_watchdog").execute("t1", {}, undefined, undefined, rt.ctx);
+	const result = await rt.tools
+		.get("watchdog_decide")
+		.execute("t1", { decision: "done" }, undefined, undefined, rt.ctx);
 	expect(JSON.stringify(result.content)).toContain("OK.");
-	expect(rt.state.abortedTurns).toBe(1); // the closing moves are cut off, like a user ESC
-
-	// our abort can land as an empty "error" message; even outside a decision window it must not show as red text
-	const phantom = await rt.emitMessageEnd({
-		role: "assistant",
-		content: [],
-		stopReason: "error",
-		errorMessage: "This operation was aborted",
-	});
-	expect(phantom.message.stopReason).toBe("stop");
-	expect(phantom.message.content).toEqual([]);
-	expect(phantom.message.errorMessage).toBeUndefined();
+	// The turn ends because the result is terminating, not because we abort: no "request ended" row is written,
+	// so there is no red error to clean up either.
+	expect(result.terminate).toBe(true);
+	expect(rt.state.abortedTurns).toBe(0);
 
 	await rt.commands.get("watchdog").handler("status", rt.ctx);
 	expect(rt.notifications.some((n) => n.msg.includes("not running"))).toBe(true);
@@ -97,7 +93,7 @@ it("calling stop_watchdog proactively, before any nudge, stops monitoring and cl
 it("a real provider error outside the decision window is left untouched", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=60", rt.ctx);
-	rt.state.idle = false; // running, but stop_watchdog was never called
+	rt.state.idle = false; // running, but watchdog_decide was never called
 
 	const real = await rt.emitMessageEnd({
 		role: "assistant",
@@ -108,22 +104,26 @@ it("a real provider error outside the decision window is left untouched", async 
 	expect(real).toBeUndefined(); // no rewrite, so the error still reaches the TUI
 });
 
-it("calling stop_watchdog while not running says there is nothing to stop", async () => {
+it("calling watchdog_decide while not running says there is nothing to stop", async () => {
 	const rt = await setup();
 	// lazy: start then fully stop, so the tool stays registered while monitoring is off
 	await rt.commands.get("watchdog").handler("timeout=60", rt.ctx);
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
-	const result = await rt.tools.get("stop_watchdog").execute("t0", {}, undefined, undefined, rt.ctx);
+	const result = await rt.tools
+		.get("watchdog_decide")
+		.execute("t0", { decision: "done" }, undefined, undefined, rt.ctx);
 	expect(JSON.stringify(result.content)).toContain("not running");
 });
 
-it("calling stop_watchdog while paused → says already suspended, state unchanged", async () => {
+it("calling watchdog_decide while paused → says already suspended, state unchanged", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1 mode=keep message=repeat stop", rt.ctx);
 	await vi.advanceTimersByTimeAsync(1100);
-	await rt.tools.get("stop_watchdog").execute("t2", {}, undefined, undefined, rt.ctx); // pause
+	await rt.tools.get("watchdog_decide").execute("t2", { decision: "done" }, undefined, undefined, rt.ctx); // pause
 
-	const result = await rt.tools.get("stop_watchdog").execute("t3", {}, undefined, undefined, rt.ctx);
+	const result = await rt.tools
+		.get("watchdog_decide")
+		.execute("t3", { decision: "done" }, undefined, undefined, rt.ctx);
 	expect(JSON.stringify(result.content)).toContain("Already suspended");
 	await rt.commands.get("watchdog").handler("status", rt.ctx); // still paused, not broken by the second call
 	expect(rt.notifications.some((n) => n.msg.includes("paused"))).toBe(true);

@@ -9,11 +9,11 @@ beforeEach(() => {
 
 it("no tool on load; the first start registers it and marks it active", async () => {
 	const rt = await setup();
-	expect(rt.tools.has("stop_watchdog")).toBe(false); // lazy: sessions without monitoring save the tool slot
+	expect(rt.tools.has("watchdog_decide")).toBe(false); // lazy: sessions without monitoring save the tool slot
 	expect(rt.commands.has("watchdog")).toBe(true);
 	await rt.commands.get("watchdog").handler("timeout=60", rt.ctx);
-	expect(rt.tools.has("stop_watchdog")).toBe(true);
-	expect(rt.activeTools.has("stop_watchdog")).toBe(true);
+	expect(rt.tools.has("watchdog_decide")).toBe(true);
+	expect(rt.activeTools.has("watchdog_decide")).toBe(true);
 });
 
 it("strict key=value: bare token / unknown key / bad value / bad mode are all rejected with usage", async () => {

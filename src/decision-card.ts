@@ -9,8 +9,13 @@ import { expandedCardIds, expandedHintIds } from "./expanded.ts";
 export interface DecisionCardData {
 	exchangeId: string;
 	outcome: "continue" | "stop" | "superseded" | "failed" | "empty";
-	/** AI reply from the decision turn (truncated); text from blocked tool calls also lands here. */
+	/** Short note the AI passed to watchdog_decide (truncated); provider error text on a failed check. */
 	reply?: string;
+	/**
+	 * Why the AI stopped: "done" (task finished) or "wait_user" (it is waiting on the user). Only set on
+	 * a stop, and only to pick the card label — both stop the same way.
+	 */
+	decision?: "done" | "wait_user";
 	/** outcome=stop in keep mode: monitoring only paused, the next user message resumes it. */
 	suspended?: boolean;
 	/** The AI stopped the watchdog itself, mid-turn: there was no check turn, so the row says so. */
@@ -23,11 +28,14 @@ export interface DecisionCardData {
 /** How the AI answered the check, in the same words the fold marker and the history use. */
 const OUTCOME_LABEL: Record<DecisionCardData["outcome"], string> = {
 	continue: "still working",
-	stop: "stopped on purpose",
+	stop: "finished — stopped on purpose",
 	superseded: "superseded",
 	failed: "check failed, will retry",
-	empty: "empty reply from model",
+	empty: "no watchdog_decide call from model",
 };
+
+/** A stop that is really a wait: the label tells the user what to do, not just what happened. */
+const WAIT_USER_LABEL = "waiting on you — reply to resume";
 
 /**
  * All plugin output on the timeline carries this marker, so a card is recognizable as watchdog's
@@ -124,7 +132,10 @@ class DecisionCardComponent extends DecisionRow {
 	}
 
 	protected label(theme: Theme, expanded: boolean): string {
-		const outcome = OUTCOME_LABEL[this.data.outcome] ?? this.data.outcome;
+		const outcome =
+			this.data.outcome === "stop" && this.data.decision === "wait_user"
+				? WAIT_USER_LABEL
+				: (OUTCOME_LABEL[this.data.outcome] ?? this.data.outcome);
 		const paused =
 			this.data.outcome === "stop" && this.data.suspended ? ` ${theme.fg("dim", "· monitoring paused")}` : "";
 		const noCheck = this.data.proactive ? ` ${theme.fg("dim", "· no check")}` : "";

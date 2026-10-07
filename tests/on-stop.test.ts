@@ -24,19 +24,19 @@ async function waitForFile(ms = 3000): Promise<boolean> {
 	return false;
 }
 
-it("stop_watchdog fires the PI_WATCHDOG_ON_STOP hook (writes the exit file)", async () => {
+it("watchdog_decide fires the PI_WATCHDOG_ON_STOP hook (writes the exit file)", async () => {
 	process.env.PI_WATCHDOG = "timeout=60";
 	process.env.PI_WATCHDOG_ON_STOP = `echo 0 > ${exitFile}`;
 	const rt = await setup();
 	await rt.emit("session_start", { reason: "startup" });
 
-	// after one nudge the AI calls stop_watchdog
+	// after one nudge the AI calls watchdog_decide
 	await vi.advanceTimersByTimeAsync(61_000);
 	await rt.settleAfterRun();
 	vi.useRealTimers(); // polling and the child process both need the real clock
-	const tool = rt.tools.get("stop_watchdog");
+	const tool = rt.tools.get("watchdog_decide");
 	expect(tool).toBeDefined();
-	await tool.execute("t1", {}, undefined, undefined, rt.ctx);
+	await tool.execute("t1", { decision: "done" }, undefined, undefined, rt.ctx);
 
 	expect(await waitForFile()).toBe(true);
 	expect(readFileSync(exitFile, "utf8").trim()).toBe("0");
@@ -48,7 +48,7 @@ it("with no PI_WATCHDOG_ON_STOP, no hook runs", async () => {
 	await rt.emit("session_start", { reason: "startup" });
 	await rt.settleAfterRun();
 	vi.useRealTimers();
-	await rt.tools.get("stop_watchdog").execute("t1", {}, undefined, undefined, rt.ctx);
+	await rt.tools.get("watchdog_decide").execute("t1", { decision: "done" }, undefined, undefined, rt.ctx);
 	await new Promise((r) => setTimeout(r, 100));
 	expect(existsSync(exitFile)).toBe(false);
 });

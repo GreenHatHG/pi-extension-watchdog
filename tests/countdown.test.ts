@@ -14,7 +14,7 @@ it("first start with an empty session → no countdown until the first agent_set
 	const rt = await setup();
 	rt.sessionEntries.length = 0; // simulate a brand-new session
 	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx);
-	expect(rt.activeTools.has("stop_watchdog")).toBe(true); // tool is active after start
+	expect(rt.activeTools.has("watchdog_decide")).toBe(true); // tool is active after start
 
 	await vi.advanceTimersByTimeAsync(1300);
 	expect(nudgeMessages(rt)).toHaveLength(0); // no messages, so no nudge
@@ -32,7 +32,7 @@ it("first start with an empty session → no countdown until the first agent_set
 
 	await rt.settleAfterRun();
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
-	expect(rt.activeTools.has("stop_watchdog")).toBe(true); // registered for good, kept after stop
+	expect(rt.activeTools.has("watchdog_decide")).toBe(true); // registered for good, kept after stop
 });
 
 it("no nudge while the AI runs; after it stops, countdown and nudge again", async () => {

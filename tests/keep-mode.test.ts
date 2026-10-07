@@ -9,16 +9,16 @@ afterEach(() => {
 	vi.useRealTimers();
 });
 
-it("keep mode: timeout nudges → stop_watchdog only pauses → an interactive message resumes", async () => {
+it("keep mode: timeout nudges → watchdog_decide only pauses → an interactive message resumes", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1 mode=keep message=keep test", rt.ctx);
 	await vi.advanceTimersByTimeAsync(1100); // decision turn
 	expect(nudgeMessages(rt)).toHaveLength(1);
 
-	// the AI calls stop_watchdog during the decision turn: pause, not off
-	const r = await rt.tools.get("stop_watchdog").execute("t10", {}, undefined, undefined, rt.ctx);
+	// the AI calls watchdog_decide during the decision turn: pause, not off
+	const r = await rt.tools.get("watchdog_decide").execute("t10", { decision: "done" }, undefined, undefined, rt.ctx);
 	expect(JSON.stringify(r.content)).toContain("OK.");
-	expect(rt.activeTools.has("stop_watchdog")).toBe(true);
+	expect(rt.activeTools.has("watchdog_decide")).toBe(true);
 
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1300);
@@ -38,8 +38,8 @@ it("keep mode: a nap keeps the status line and shows ⏱⏸ instead of the last 
 	await rt.settleAfterRun(); // idle → counting, so the bar reads ⏱1s
 	expect(rt.statusBars.get("watchdog")).toContain("⏱1s");
 
-	// the AI calls stop_watchdog while idle → soft stop = nap, not a full stop
-	await rt.tools.get("stop_watchdog").execute("t12", {}, undefined, undefined, rt.ctx);
+	// the AI calls watchdog_decide while idle → soft stop = nap, not a full stop
+	await rt.tools.get("watchdog_decide").execute("t12", { decision: "done" }, undefined, undefined, rt.ctx);
 	expect(rt.statusBars.get("watchdog")).toContain("⏱⏸");
 
 	// the user comes back: the nap ends and the bar counts down again
@@ -52,7 +52,7 @@ it("keep mode: an input from an extension does not resume", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1 mode=keep message=keep test2", rt.ctx);
 	await vi.advanceTimersByTimeAsync(1100);
-	await rt.tools.get("stop_watchdog").execute("t10b", {}, undefined, undefined, rt.ctx); // pause
+	await rt.tools.get("watchdog_decide").execute("t10b", { decision: "done" }, undefined, undefined, rt.ctx); // pause
 	await rt.settleAfterRun();
 
 	await rt.emit("input", { text: "nudge message", source: "extension" });
@@ -66,7 +66,7 @@ it("keep mode: a manual stop while running also fully stops, and a new message d
 	await rt.commands.get("watchdog").handler("timeout=1 mode=keep message=keep test3", rt.ctx);
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 	expect(rt.notifications.some((n) => n.msg.includes("monitoring stopped"))).toBe(true);
-	expect(rt.activeTools.has("stop_watchdog")).toBe(true); // registered for good, no longer removed on start/stop
+	expect(rt.activeTools.has("watchdog_decide")).toBe(true); // registered for good, no longer removed on start/stop
 
 	await rt.emit("input", { text: "plain message", source: "interactive" });
 	await rt.commands.get("watchdog").handler("status", rt.ctx);
@@ -77,7 +77,7 @@ it("keep mode: a manual stop while paused → fully off", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1 mode=keep message=keep test4", rt.ctx);
 	await vi.advanceTimersByTimeAsync(1100);
-	await rt.tools.get("stop_watchdog").execute("t10c", {}, undefined, undefined, rt.ctx); // pause
+	await rt.tools.get("watchdog_decide").execute("t10c", { decision: "done" }, undefined, undefined, rt.ctx); // pause
 	await rt.commands.get("watchdog").handler("status", rt.ctx);
 	expect(rt.notifications.some((n) => n.msg.includes("paused"))).toBe(true);
 
@@ -99,7 +99,7 @@ it("keep mode: hitting the max cap → fully off, a new message does not resume"
 	await vi.advanceTimersByTimeAsync(1100); // the 2nd is blocked, keep mode also fully off
 	expect(nudgeMessages(rt)).toHaveLength(1);
 	expect(rt.notifications.some((n) => n.msg.includes("auto-stopped"))).toBe(true);
-	expect(rt.activeTools.has("stop_watchdog")).toBe(true); // registered for good, no longer removed on start/stop
+	expect(rt.activeTools.has("watchdog_decide")).toBe(true); // registered for good, no longer removed on start/stop
 
 	await rt.emit("input", { text: "new task", source: "interactive" }); // no resume
 	await rt.commands.get("watchdog").handler("status", rt.ctx);
@@ -115,15 +115,16 @@ it("PI_WATCHDOG mode=keep: auto-starts in keep mode, a new message resumes after
 	await vi.advanceTimersByTimeAsync(1300); // decision turn
 	expect(nudgeMessages(rt)).toHaveLength(1);
 
-	const r = await rt.tools.get("stop_watchdog").execute("t11", {}, undefined, undefined, rt.ctx); // inside the decision window → pause
+	const r = await rt.tools.get("watchdog_decide").execute("t11", { decision: "done" }, undefined, undefined, rt.ctx); // inside the decision window → pause
 	expect(JSON.stringify(r.content)).toContain("OK.");
 
 	await rt.emit("input", { text: "continue new task", source: "interactive" });
 	expect(rt.notifications.some((n) => n.msg.includes("resumed"))).toBe(true);
-	await rt.settleAfterRun(); // settle the decision turn that the pause interrupted
+	await rt.settleAfterRun(); // settle the decision turn that the pause interrupted → launches the work turn
+	rt.state.idle = true; // the work turn pi queued (the continuation) runs and finishes
 	await vi.advanceTimersByTimeAsync(2300); // ticker restarts the countdown (≤1s) + 1s timeout
 	expect(nudgeMessages(rt).length).toBeGreaterThanOrEqual(2);
 
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
-	expect(rt.activeTools.has("stop_watchdog")).toBe(true); // registered for good, no longer removed on start/stop
+	expect(rt.activeTools.has("watchdog_decide")).toBe(true); // registered for good, no longer removed on start/stop
 });

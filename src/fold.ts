@@ -58,7 +58,7 @@ function carriesToolCall(message: unknown, toolCallId: string): boolean {
  *     this message, so the model still sees the prompt for the real work turn; or
  *   - a fold marker (`:fold`, user took over / aborted turn): drop that too.
  *
- * A proactive stop (`:stopped`, written when the AI called stop_watchdog outside any
+ * A proactive stop (`:stopped`, written when the AI called watchdog_decide outside any
  * check) folds the mirror image: the range is the run that *ends* at the marker, not
  * the one that starts at it. It starts at the assistant message carrying the tool
  * call the marker names, and covers everything up to the marker — the closing text,

@@ -21,7 +21,9 @@ export function createMockRuntime() {
 	const entryRenderers = new Map<string, (entry: any, options: any, theme: any) => any>();
 	// Renderers from registerMessageRenderer, used by the nudge-hint render checks.
 	const messageRenderers = new Map<string, (message: any, options: any, theme: any) => any>();
-	let abortedTurns = 0;
+	let abortCount = 0;
+	// Errors a tool threw, the way pi turns a throw into an error tool result; tests assert on the wording.
+	const toolErrors: string[] = [];
 	const notifications: { msg: string; kind: string }[] = [];
 	const sessionEntries: any[] = [{ type: "message" }]; // A non-empty session by default; tests that need a fresh session clear this.
 	let leafId: string | null = null;
@@ -40,7 +42,7 @@ export function createMockRuntime() {
 		hasPendingMessages: () => pendingMessages > 0,
 		// Like real pi: abort the running turn and go idle.
 		abort: () => {
-			abortedTurns++;
+			abortCount++;
 			idle = true;
 		},
 		sessionManager: {
@@ -165,7 +167,11 @@ export function createMockRuntime() {
 	const emitMessageEnd = async (message: any) => {
 		for (const h of handlers.get("message_end") ?? []) {
 			const result = await h({ type: "message_end", message }, ctx);
-			if (result) return result;
+			if (result) {
+				// Like real pi: the rewrite lands on the stored row in place, so agent_end sees the new shape.
+				if (result.message) Object.assign(message, result.message);
+				return result;
+			}
 		}
 		return undefined;
 	};
@@ -180,8 +186,13 @@ export function createMockRuntime() {
 
 	/**
 	 * Simulate a finished run: go idle and fire agent_settled, so the watchdog counts down again.
-	 * Pass the assistant message the run produced when a test needs a specific reply (text, tool call,
-	 * or nothing at all). The default is a plain text answer that ends the decision turn with "continue".
+	 * Pass the assistant message the run produced when a test needs a specific answer (a watchdog_decide
+	 * call, some other tool call, text, or nothing at all). The default answers the check with
+	 * `watchdog_decide("continue")`, which is the normal "work remains" answer.
+	 *
+	 * Like real pi, the tool batch runs before the run ends, so the watchdog sees the answer without every
+	 * test having to run the tool by hand. Like real pi too, a batch whose every result is terminating ends
+	 * the run: with terminate there is no abort, so no synthesized empty "error" row either.
 	 */
 	const settleAfterRun = async (message?: any) => {
 		entrySeq += 1;
@@ -191,13 +202,45 @@ export function createMockRuntime() {
 		// Like real pi: the run's assistant message is saved first, then the run ends.
 		const assistant = message ?? {
 			role: "assistant",
-			content: [{ type: "text", text: "still working" }],
-			stopReason: "stop",
+			content: [{ type: "toolCall", id: "wc", name: "watchdog_decide", arguments: { decision: "continue" } }],
+			stopReason: "toolUse",
 		};
 		await emitMessageEnd(assistant);
+		await runToolBatch(assistant);
 		await emit("agent_end", { messages: [assistant] });
 		idle = true;
 		await emit("agent_settled");
+	};
+
+	/**
+	 * Run a tool batch the way pi does: a tool_call hook may block a call, only watchdog_decide executes, and
+	 * the batch ends the run when every finalized result carries terminate. Returns that flag. A tool that
+	 * throws becomes an error result (pi never marks a returned value as an error), which is not terminating.
+	 */
+	const runToolBatch = async (message: any): Promise<boolean> => {
+		const tool = tools.get("watchdog_decide");
+		const terminating: boolean[] = [];
+		for (const block of message?.content ?? []) {
+			if (block?.type !== "toolCall" && block?.type !== "tool_use") continue;
+			const blocked = await emitToolCall({
+				toolName: block.name,
+				toolCallId: block.id,
+				input: block.arguments ?? {},
+			});
+			if (blocked?.block) {
+				terminating.push(blocked.terminate === true);
+				continue;
+			}
+			if (block.name !== "watchdog_decide" || !tool) continue;
+			try {
+				const result = await tool.execute(block.id, block.arguments ?? {}, undefined, undefined, ctx);
+				terminating.push(result?.terminate === true);
+			} catch (error) {
+				toolErrors.push(error instanceof Error ? error.message : String(error));
+				terminating.push(false);
+			}
+		}
+		return terminating.length > 0 && terminating.every(Boolean);
 	};
 
 	/** Simulate an aborted turn (user pressed ESC): no new message, assistant stopReason "aborted". */
@@ -224,6 +267,7 @@ export function createMockRuntime() {
 		currentMessages,
 		pressKey,
 		settleAfterRun,
+		runToolBatch,
 		settleAbortedTurn,
 		newPlugin,
 		pushMessage,
@@ -248,7 +292,7 @@ export function createMockRuntime() {
 				pendingMessages = v;
 			},
 			get abortedTurns() {
-				return abortedTurns;
+				return abortCount;
 			},
 		},
 		tools,
@@ -263,6 +307,7 @@ export function createMockRuntime() {
 		statusBars,
 		sessionEntries,
 		eventBusHandlers,
+		toolErrors,
 	};
 }
 

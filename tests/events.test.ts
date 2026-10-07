@@ -37,7 +37,7 @@ it("keep mode pause publishes running=false; a new user message brings it back t
 	rt.pi.events.on("watchdog:state", (state: unknown) => states.push(state));
 
 	await rt.commands.get("watchdog").handler("timeout=10 mode=keep", rt.ctx);
-	await rt.tools.get("stop_watchdog").execute("stop", {}, undefined, undefined, rt.ctx);
+	await rt.tools.get("watchdog_decide").execute("stop", { decision: "done" }, undefined, undefined, rt.ctx);
 	expect(states.at(-1)).toMatchObject({ running: false, suspended: true, keepAlive: true });
 
 	await rt.emit("input", { text: "next task", source: "interactive" });

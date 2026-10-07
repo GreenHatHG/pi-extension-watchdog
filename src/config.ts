@@ -5,7 +5,7 @@ import { DEFAULT_TIMEOUT_SECONDS } from "./constants.ts";
  *   timeout=seconds  nudge after N idle seconds
  *   max=N            nudge at most N times
  *   message=text     extra order, glued after the fixed trigger line (never replaces it)
- *   mode=once|keep   once is the default; keep means stop_watchdog only pauses, and the next user message resumes
+ *   mode=once|keep   once is the default; keep means watchdog_decide only pauses, and the next user message resumes
  * A bad token returns ok=false, and error is ready to show as-is.
  */
 export type ParsedConfig =
@@ -55,8 +55,8 @@ export function parseConfig(raw: string): ParsedConfig {
  *   PI_WATCHDOG=1                     default seconds, count and text
  *   PI_WATCHDOG=0 / false             do not start
  *   PI_WATCHDOG="timeout=30 max=100"  idle 30s, up to 100 nudges
- *   PI_WATCHDOG="timeout=5 mode=keep" keep mode, stop_watchdog only pauses
- *   PI_WATCHDOG_ON_STOP="<shell>"     hook run when stop_watchdog is called, e.g. touch an exit file
+ *   PI_WATCHDOG="timeout=5 mode=keep" keep mode, watchdog_decide only pauses
+ *   PI_WATCHDOG_ON_STOP="<shell>"     hook run when watchdog_decide is called, e.g. touch an exit file
  */
 export function parseEnvConfig(): ParsedConfig | null {
 	const raw = process.env.PI_WATCHDOG?.trim();

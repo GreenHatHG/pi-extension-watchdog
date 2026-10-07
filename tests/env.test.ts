@@ -64,7 +64,7 @@ it("PI_WATCHDOG=0 does not auto-start (and does not register the tool, saving to
 	const rt = await setup();
 	await rt.emit("session_start", { reason: "startup" });
 	expect(rt.notifications).toHaveLength(0);
-	expect(rt.activeTools.has("stop_watchdog")).toBe(false); // lazy: no start, no tool
+	expect(rt.activeTools.has("watchdog_decide")).toBe(false); // lazy: no start, no tool
 });
 
 it("bad PI_WATCHDOG format: clear warning, no silent skip, no start", async () => {
@@ -72,7 +72,7 @@ it("bad PI_WATCHDOG format: clear warning, no silent skip, no start", async () =
 	const rt = await setup();
 	await rt.emit("session_start", { reason: "startup" });
 	expect(rt.notifications.some((n) => n.msg.includes("bad PI_WATCHDOG"))).toBe(true);
-	expect(rt.activeTools.has("stop_watchdog")).toBe(false); // lazy: no start, no tool
+	expect(rt.activeTools.has("watchdog_decide")).toBe(false); // lazy: no start, no tool
 });
 
 it("PI_WATCHDOG=1 uses the default settings (60s)", async () => {

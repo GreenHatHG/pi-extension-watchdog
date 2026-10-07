@@ -45,7 +45,18 @@ it("a decision turn killed by a provider error is retried by the next countdown,
 	expect(rt.notifications.some((n) => n.msg.includes("nudged 2/3"))).toBe(true);
 
 	// The retried check answers normally → continue message, so work resumes.
-	await rt.settleAfterRun({ role: "assistant", content: [{ type: "text", text: "still going" }] });
+	await rt.settleAfterRun({
+		role: "assistant",
+		content: [
+			{
+				type: "toolCall",
+				id: "wc2",
+				name: "watchdog_decide",
+				arguments: { decision: "continue", note: "still going" },
+			},
+		],
+		stopReason: "toolUse",
+	});
 	expect(continuationMessages(rt)).toHaveLength(1);
 	expect(cards(rt).map((c) => c.outcome)).toEqual(["failed", "continue"]);
 
@@ -118,21 +129,22 @@ it("an empty reply is treated like a failed check: card, fold marker, countdown,
 	expect(continuationMessages(rt)).toHaveLength(0);
 });
 
-it("a decision turn whose only output is a blocked tool call is not an empty reply", async () => {
+it("a check turn that tries to work instead of answering counts as no answer", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1 max=3 message=tool only", rt.ctx);
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1100); // check 1
 
-	// The model tried to work instead of answering; the call is blocked, so there is no text either.
+	// The model reached for its tools instead of answering. The call is blocked, and a blocked call is not
+	// an answer: nothing sets the check's decision, so this is silence and the countdown starts over.
 	await rt.settleAfterRun({
 		role: "assistant",
 		content: [{ type: "toolCall", id: "c1", name: "bash", arguments: {} }],
 		stopReason: "toolUse",
 	});
 
-	expect(cards(rt)[0]).toMatchObject({ outcome: "continue" });
-	expect(continuationMessages(rt)).toHaveLength(1);
+	expect(cards(rt)[0]).toMatchObject({ outcome: "empty" });
+	expect(continuationMessages(rt)).toHaveLength(0);
 
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });
@@ -162,10 +174,23 @@ it("a decision turn that errored and then recovered inside pi still continues no
 	await rt.emit("agent_end", {
 		messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: "x" }],
 	});
-	await rt.emitMessageEnd({ role: "assistant", content: [{ type: "text", text: "answered after retry" }] });
-	await rt.emit("agent_end", {
-		messages: [{ role: "assistant", content: [{ type: "text", text: "answered after retry" }], stopReason: "stop" }],
-	});
+	const answered = {
+		role: "assistant",
+		content: [
+			{
+				type: "toolCall",
+				id: "wc3",
+				name: "watchdog_decide",
+				arguments: { decision: "continue", note: "answered after retry" },
+			},
+		],
+		stopReason: "toolUse",
+	};
+	await rt.emitMessageEnd(answered);
+	await rt.tools
+		.get("watchdog_decide")
+		.execute("wc3", { decision: "continue", note: "answered after retry" }, undefined, undefined, rt.ctx);
+	await rt.emit("agent_end", { messages: [answered] });
 	rt.state.idle = true;
 	await rt.emit("agent_settled");
 
@@ -176,19 +201,15 @@ it("a decision turn that errored and then recovered inside pi still continues no
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });
 
-it("the phantom abort error from stop_watchdog is never mistaken for a failed check", async () => {
+it("a stop answer is not mistaken for a failed check, even if an unrelated error row lands", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1 max=3", rt.ctx);
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1100); // check 1
 
-	await rt.tools.get("stop_watchdog").execute("t1", {}, undefined, undefined, rt.ctx);
-	await rt.emitMessageEnd({
-		role: "assistant",
-		content: [],
-		stopReason: "error",
-		errorMessage: "This operation was aborted",
-	});
+	// The stop answer is already in hand; nothing else in the run may talk the watchdog into a retry. The
+	// answer outranks a failure on purpose: the worst case has to be a retried check, never a lost answer.
+	await rt.tools.get("watchdog_decide").execute("t1", { decision: "done" }, undefined, undefined, rt.ctx);
 	await rt.emit("agent_end", {
 		messages: [{ role: "assistant", content: [], stopReason: "error", errorMessage: "This operation was aborted" }],
 	});

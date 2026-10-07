@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { DECISION_ENTRY_TYPE, DECISION_MESSAGE, DECISION_MESSAGE_TYPE, EMPTY_REPLY_NOTE } from "../src/constants.ts";
+import {
+	DECISION_ENTRY_TYPE,
+	DECISION_MESSAGE,
+	DECISION_MESSAGE_TYPE,
+	DECISION_NOTE_MAX_CHARS,
+	EMPTY_REPLY_NOTE,
+} from "../src/constants.ts";
 import type { DecisionCardData } from "../src/decision-card.ts";
 import { nudgeMessages, setup } from "./helpers/setup.js";
 
@@ -51,7 +57,7 @@ const cardView = (rt: { entryRenderers: Map<string, any> }, data: DecisionCardDa
 		theme,
 	);
 
-it("outcome continue drops one card with the AI reply", async () => {
+it("outcome continue drops one card with the note the AI passed to watchdog_decide", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx);
 	await rt.settleAfterRun();
@@ -60,7 +66,20 @@ it("outcome continue drops one card with the AI reply", async () => {
 	// The check hint is the visible nudge message; the result entry is a history record.
 	expect(nudgeMessages(rt)[0]?.display).toBe(true);
 
-	await rt.settleAfterRun({ role: "assistant", content: [{ type: "text", text: "still working on it" }] }); // settle → continue
+	// A check turn answers only by calling the tool; the optional note is what the card shows.
+	await rt.settleAfterRun({
+		role: "assistant",
+		content: [
+			{ type: "text", text: "a paragraph of prose the card must ignore" },
+			{
+				type: "toolCall",
+				id: "wc",
+				name: "watchdog_decide",
+				arguments: { decision: "continue", note: "still working on it" },
+			},
+		],
+		stopReason: "toolUse",
+	}); // settle → continue
 
 	const found = cards(rt);
 	expect(found).toHaveLength(1);
@@ -72,29 +91,33 @@ it("outcome continue drops one card with the AI reply", async () => {
 	});
 });
 
-it("when the AI calls stop_watchdog the card says stopped on purpose and keeps the extra text", async () => {
+it("when the AI stops the card says so and keeps the note; a wait gets its own label", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx);
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1100); // decision turn
 
-	await rt.tools.get("stop_watchdog").execute("t1", {}, undefined, undefined, rt.ctx);
+	await rt.tools.get("watchdog_decide").execute("t1", { decision: "done" }, undefined, undefined, rt.ctx);
 	// Nothing is saved yet: the turn may still say a closing line, and history holds one entry per exchange.
 	expect(cards(rt)).toHaveLength(0);
 
-	// Extra text in the same message as the tool call lands in that entry, not a second one.
-	await rt.settleAfterRun({
-		role: "assistant",
-		content: [
-			{ type: "text", text: "all done" },
-			{ type: "toolCall", id: "cs", name: "stop_watchdog", arguments: {} },
-		],
-		stopReason: "toolUse",
-	}); // settle → stop
+	await rt.settleAfterRun();
 
 	const found = cards(rt);
 	expect(found).toHaveLength(1);
-	expect(found[0]).toMatchObject({ outcome: "stop", reply: "all done" });
+	expect(found[0]).toMatchObject({ outcome: "stop", decision: "done" });
+	expect(cardView(rt, found[0]!).render(80).join("\n")).toContain("stopped on purpose");
+
+	// "wait_user" stops exactly like "done"; only the label differs, and it says what to do next.
+	const waiting = cardView(rt, {
+		exchangeId: "w2",
+		outcome: "stop",
+		decision: "wait_user",
+		nudgeCount: 1,
+		maxNudges: 50,
+		ts: 0,
+	});
+	expect(waiting.render(80).join("\n")).toContain("waiting on you");
 });
 
 it("when the user takes over the card says superseded, not stop", async () => {
@@ -111,18 +134,22 @@ it("when the user takes over the card says superseded, not stop", async () => {
 	expect(found[0].outcome).toBe("superseded");
 });
 
-it("a very long AI reply is cut to the cap before saving", async () => {
+it("the card truncates a note that ignores the one-line instruction", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx);
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1100);
 
 	const long = "x".repeat(400);
-	await rt.settleAfterRun({ role: "assistant", content: [{ type: "text", text: long }] });
+	await rt.settleAfterRun({
+		role: "assistant",
+		content: [{ type: "toolCall", id: "wc", name: "watchdog_decide", arguments: { decision: "continue", note: long } }],
+		stopReason: "toolUse",
+	});
 
 	const found = cards(rt);
-	expect(found[0].reply).toHaveLength(300);
-	expect(found[0].reply).toBe(long.slice(0, 300));
+	expect(found[0].reply).toHaveLength(DECISION_NOTE_MAX_CHARS);
+	expect(found[0].reply).toBe(long.slice(0, DECISION_NOTE_MAX_CHARS));
 });
 
 it("the nudge message renders as a collapsed hint and shows the prompt only when expanded", async () => {
@@ -141,15 +168,19 @@ it("the nudge message renders as a collapsed hint and shows the prompt only when
 	expect(expanded).toContain("Watchdog check");
 });
 
-it("the decision prompt names stop_watchdog as the only allowed tool, so it does not contradict itself", () => {
-	expect(DECISION_MESSAGE).toContain("every tool except stop_watchdog is blocked");
+it("the decision prompt names watchdog_decide as the only allowed tool, so it does not contradict itself", () => {
+	expect(DECISION_MESSAGE).toContain("every tool except watchdog_decide is blocked");
 });
 
-it("the decision prompt spells out that text means still working, so a 'done' reply is not read as done", () => {
-	// The check turn has no other channel: the model has to know that answering with words buys another
-	// work turn, or "all done, here is the report again" costs a round and repeats itself.
-	expect(DECISION_MESSAGE).toContain('text reply is read as "work remains"');
-	expect(DECISION_MESSAGE).toContain("never restate");
+it("the decision prompt says text is not an answer and names the three decisions", () => {
+	// The check turn reads exactly one signal: the tool call. Saying so out loud is what stops the model
+	// from writing its delivery into a channel that folds away, and gives "work remains" a real action.
+	expect(DECISION_MESSAGE).toContain("Do not answer with text");
+	expect(DECISION_MESSAGE).toContain('"continue" if work remains');
+	expect(DECISION_MESSAGE).toContain('"done" if the task is finished');
+	expect(DECISION_MESSAGE).toContain('"wait_user" if you are waiting on a user decision');
+	// A model that answers "continue" must know the work happens next turn, not now.
+	expect(DECISION_MESSAGE).toContain("This turn never does work");
 });
 
 it("in fullscreen the hint expands on click and collapses on a second click", async () => {
@@ -217,7 +248,7 @@ it("an empty reply renders its own outcome and explains itself when expanded", a
 
 	// The row must not claim the model is "still working": it said nothing at all.
 	const collapsed = cardView(rt, data).render(80).join("\n");
-	expect(collapsed).toContain("empty reply from model");
+	expect(collapsed).toContain("no watchdog_decide call from model");
 	expect(collapsed).not.toContain("still working");
 	expect(collapsed).toContain("click to expand");
 	expect(collapsed).not.toContain(EMPTY_REPLY_NOTE);
@@ -273,7 +304,7 @@ it("a keep-mode stop still records the paused state in history", async () => {
 	await rt.commands.get("watchdog").handler("timeout=1 mode=keep", rt.ctx);
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1100);
-	await rt.tools.get("stop_watchdog").execute("t1", {}, undefined, undefined, rt.ctx);
+	await rt.tools.get("watchdog_decide").execute("t1", { decision: "done" }, undefined, undefined, rt.ctx);
 	await rt.settleAfterRun();
 
 	const found = cards(rt);
@@ -285,62 +316,59 @@ it("a once-mode stop card has no paused state", async () => {
 	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx);
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1100);
-	await rt.tools.get("stop_watchdog").execute("t1", {}, undefined, undefined, rt.ctx);
+	await rt.tools.get("watchdog_decide").execute("t1", { decision: "done" }, undefined, undefined, rt.ctx);
 	await rt.settleAfterRun();
 
 	expect(cards(rt)[0]).toMatchObject({ outcome: "stop", suspended: false });
 });
 
-it("the stopReason error message left by stop_watchdog's abort is cleared inside the decision window", async () => {
+it("an abort the plugin did not fire is never touched, in or out of a decision window", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx);
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1100); // decision window opens
 
-	// a real error in the decision window must not be swallowed: it stays when stop_watchdog was not called
+	// The tool ends its turn with terminate now, so it never produces an empty "error" row, and a row that
+	// does appear is always somebody else's: it must reach the card and the TUI unchanged.
 	const real = await rt.emitMessageEnd({
 		role: "assistant",
 		content: [],
 		stopReason: "error",
 		errorMessage: "boom",
 	});
-	expect(real.message.stopReason).toBe("error");
-	expect(real.message.errorMessage).toBe("boom");
+	expect(real).toBeUndefined(); // untouched, so the error still reaches the TUI
 
-	await rt.tools.get("stop_watchdog").execute("t1", {}, undefined, undefined, rt.ctx);
-	const phantom = await rt.emitMessageEnd({
+	await rt.tools.get("watchdog_decide").execute("t1", { decision: "done" }, undefined, undefined, rt.ctx);
+	const afterStop = await rt.emitMessageEnd({
 		role: "assistant",
 		content: [],
 		stopReason: "error",
 		errorMessage: "This operation was aborted",
 	});
-	expect(phantom.message.stopReason).toBe("stop");
-	expect(phantom.message.content).toEqual([]);
-	expect(phantom.message.errorMessage).toBeUndefined();
+	expect(afterStop).toBeUndefined(); // same for anything landing after the stop answer
 });
 
-it("a user ESC (stopReason aborted) is not rewritten, so runWasAborted still works", async () => {
+it("a user ESC (stopReason aborted) still reads as a user ESC, not as something the plugin did", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx);
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1100); // decision window opens
 
-	// after a user interjection they press ESC themselves: the stopCalled branch must not touch this
-	await rt.tools.get("stop_watchdog").execute("t1", {}, undefined, undefined, rt.ctx);
+	// Our own paths end their turn with terminate, so an "aborted" row is the user's own ESC and has to keep
+	// working: nothing rewrites the row, and runWasAborted still sees it.
 	const escaped = await rt.emitMessageEnd({
 		role: "assistant",
 		content: [],
 		stopReason: "aborted",
 		errorMessage: "Operation aborted",
 	});
-	expect(escaped.message.stopReason).toBe("aborted");
-	expect(escaped.message.errorMessage).toBe("Operation aborted");
+	expect(escaped).toBeUndefined(); // untouched, so runWasAborted still sees "aborted"
 });
 
-it("stop_watchdog's tool lines render empty (renderShell:self plus empty renderCall/renderResult)", async () => {
+it("watchdog_decide's tool lines render empty (renderShell:self plus empty renderCall/renderResult)", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx); // lazy tool registration
-	const tool = rt.tools.get("stop_watchdog");
+	const tool = rt.tools.get("watchdog_decide");
 	expect(tool.renderShell).toBe("self");
 	const ctxArg = { args: {}, toolCallId: "t1", state: {}, expanded: false, isPartial: false };
 	expect(tool.renderCall({}, theme, ctxArg).render(80)).toEqual([]);

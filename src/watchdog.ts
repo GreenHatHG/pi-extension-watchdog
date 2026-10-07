@@ -3,6 +3,7 @@ import type {
 	AgentEndEvent,
 	AgentSettledEvent,
 	AgentStartEvent,
+	AgentToolResult,
 	ExtensionAPI,
 	ExtensionContext,
 	InputEvent,
@@ -17,44 +18,57 @@ import { Type } from "typebox";
 import { parseConfig, parseEnvConfig } from "./config.ts";
 import {
 	ACTIVITY_GRACE_MS,
+	BAD_DECISION_NOTE,
 	CONTINUATION_MESSAGE_TYPE,
 	continuationText,
+	DECISION_CONTINUE,
+	DECISION_DONE,
 	DECISION_ENTRY_TYPE,
 	DECISION_MESSAGE,
 	DECISION_MESSAGE_TYPE,
-	DECISION_REPLY_MAX_CHARS,
+	DECISION_NOTE_MAX_CHARS,
+	DECISION_WAIT_USER,
+	DECISIONS,
 	DEFAULT_MAX_NUDGES,
 	DEFAULT_TIMEOUT_SECONDS,
+	type Decision,
 	EMPTY_REPLY_NOTE,
 	FOLD_MESSAGE_TYPE,
+	NOT_IN_CHECK_TURN_NOTE,
 	STATUS_KEY,
 	STOP_MESSAGE_TYPE,
+	type StopDecision,
+	TOOL_DESCRIPTION,
 	TOOL_NAME,
+	TOOL_PROMPT_GUIDELINES,
+	TOOL_PROMPT_SNIPPET,
 } from "./constants.ts";
 import { type DecisionCardData, registerDecisionCardRenderers } from "./decision-card.ts";
 import { expandedCardIds, expandedHintIds } from "./expanded.ts";
 import { registerWatchdogContextFolding } from "./fold.ts";
 import { MODE_POLICY, modeFromKeepAlive, type WatchdogMode } from "./mode.ts";
-import { isRecord, isRestoredReason, textFromContent } from "./utils.ts";
+import { isRestoredReason } from "./utils.ts";
 
 /** One decision exchange: from the nudge we send until that turn settles. */
 interface DecisionWindow {
 	exchangeId: string;
-	stopCalled: boolean;
-	replyText?: string;
+	/** The answer the model gave; undefined means it never called the tool (an empty check). */
+	decision?: Decision;
+	/** Short note the AI passed along, kept for the history card. */
+	note?: string;
 	/** User hit ESC during the decision turn: close it as superseded, don't continue. */
 	aborted?: boolean;
+	/** A real user message landed mid-check: the user took over, so the check is void. */
+	userInterjected?: boolean;
 	/** The provider request that carried this check failed, so the check never got an answer. */
 	failed?: boolean;
 	/** Provider error text from that failure, kept for the history card. */
 	failureMessage?: string;
-	/** The turn emitted a tool call (even a blocked one), so "no text" is not the same as "no answer". */
-	sawToolCall?: boolean;
 }
 
 interface WatchdogState {
 	running: boolean;
-	/** Mode: once shuts down on stop_watchdog; keep only pauses, and the next user message wakes us. */
+	/** Mode: once shuts the watchdog down on an AI stop; keep only pauses, and the next user message wakes us. */
 	mode: WatchdogMode;
 	/** Paused in keep mode; a new user message resumes us. */
 	suspended: boolean;
@@ -107,11 +121,9 @@ let activeCtx: ExtensionContext | null = null;
 let decisionWindow: DecisionWindow | null = null;
 /** Cancel handle for the raw-key listener; only interactive mode gives us one. */
 let unsubTerminalInput: (() => void) | null = null;
-/** Register stop_watchdog once and never remove it, to keep the prompt cache prefix stable. */
+/** Register watchdog_decide once and never remove it, to keep the prompt cache prefix stable. */
 let toolRegistered = false;
 let exchangeCounter = 0;
-/** stop_watchdog is aborting the running turn; the provider may land a phantom "error" message we must clear. */
-let stopAbortPending = false;
 
 /**
  * The proactive stop waiting to be written down: the tool ran, but the run it belongs to is not over yet.
@@ -121,10 +133,12 @@ let stopAbortPending = false;
 interface PendingProactiveStop {
 	/** Fresh each time, so the marker links back to this stop and to nothing else. */
 	exchangeId: string;
-	/** The stop_watchdog call the range hangs off; the assistant message carrying it starts the range. */
+	/** The watchdog_decide call the range hangs off; the assistant message carrying it starts the range. */
 	toolCallId: string;
 	/** Keep mode: monitoring is only suspended, and the card says so. */
 	suspended: boolean;
+	/** Why the AI stopped: "done" or "wait_user". */
+	decision: StopDecision;
 	nudgeCount: number;
 }
 let pendingProactiveStop: PendingProactiveStop | null = null;
@@ -133,7 +147,7 @@ export default function (extensionApi: ExtensionAPI) {
 	pi = extensionApi;
 	// pi re-runs this factory for every new session but keeps the module cached, so clear the flag here.
 	// Left alone it would carry the previous session's registration into this one, whose tool table is empty,
-	// and startWatchdog would skip registerStopTool, leaving the AI without stop_watchdog.
+	// and startWatchdog would skip registerDecideTool, leaving the AI without watchdog_decide.
 	toolRegistered = false;
 	// Same reason: a stop whose run never settled must not follow us into the new session.
 	pendingProactiveStop = null;
@@ -153,9 +167,9 @@ export default function (extensionApi: ExtensionAPI) {
 	// User sends a real message: wake a paused run and clear the ESC stop.
 	pi.on("input", onInput);
 	pi.on("agent_start", onAgentStart);
-	// During a decision turn: block every tool except stop_watchdog.
+	// During a decision turn: block every tool except watchdog_decide.
 	pi.on("tool_call", onToolCall);
-	// A message is saved: strip the decision turn's reply text.
+	// A user message saved mid-check: the check is void, the user is in charge now.
 	pi.on("message_end", onMessageEnd);
 	// A run ends: remember if the user pressed ESC.
 	pi.on("agent_end", onAgentEnd);
@@ -209,21 +223,38 @@ function onAgentStart(_event: AgentStartEvent, ctx: ExtensionContext) {
 	renderStatus(ctx);
 }
 
-/** Block all tools except stop_watchdog during a decision turn, so the exchange stays one clean foldable block. */
+/**
+ * Block all tools except watchdog_decide during a decision turn, so the exchange stays one clean foldable block.
+ *
+ * The block also carries `terminate: true`, which is what lets the answer end the turn without an abort:
+ * pi only stops after a tool batch when EVERY finalized result in it is terminating. On its own the block
+ * means "the model reached for a tool and got nothing" — that is not an answer, so the check ends as
+ * `empty` and the next countdown retries it, exactly like a check that came back silent. In a mixed batch
+ * (a blocked tool next to watchdog_decide) it makes the whole batch terminating, so the answer still ends
+ * the turn instead of costing one more model call.
+ */
 function onToolCall(event: ToolCallEvent): ToolCallEventResult | undefined {
 	if (decisionWindow === null) return;
 	if (event.toolName === TOOL_NAME) return;
 	return {
 		block: true,
+		terminate: true,
 		reason:
-			"Watchdog decision turn: every tool except stop_watchdog is blocked. Reply with a brief acknowledgement if work remains; " +
-			"otherwise call stop_watchdog.",
+			`This is a watchdog check turn: every tool except ${TOOL_NAME} is blocked, and nothing you do here reaches the user. ` +
+			`Call ${TOOL_NAME} to answer — "${DECISION_CONTINUE}" if work remains, "${DECISION_DONE}" if the task is finished, ` +
+			`"${DECISION_WAIT_USER}" if you are waiting on the user. Your text is kept as a message, but it is not an answer.`,
 	};
 }
 
-/** A run ended: flag a user stop (ESC or another extension's abort) from the "aborted" stopReason; stop_watchdog sets running=false first, so we skip it. */
+/**
+ * A run ended: flag a user stop from the "aborted" stopReason (ESC, or another extension's abort).
+ *
+ * Our own paths never land here as a stop any more: the tool ends its turn with `terminate: true`, so no
+ * abort is fired and no synthesized "request ended" row is written. A stop answer also clears `running`
+ * before the run ends, which the guard below reads.
+ */
 function onAgentEnd(event: AgentEndEvent, ctx: ExtensionContext) {
-	if (state.running && decisionWindow !== null && !stopAbortPending) {
+	if (state.running && decisionWindow !== null) {
 		// Pi may retry a run internally, so read the newest decision from every agent_end; the
 		// final one before agent_settled decides whether the check really failed.
 		const error = runError(event.messages);
@@ -235,13 +266,13 @@ function onAgentEnd(event: AgentEndEvent, ctx: ExtensionContext) {
 	if (decisionWindow !== null) {
 		// ESC during a decision turn means the user took over: mark it superseded so agent_settled won't continue.
 		decisionWindow.aborted = true;
-		// If the user had already queued a real user message, the model may have eaten it without a retry, so tell them to resend.
+		// If the user had already sent a real message, the model may have been cut off before answering it.
 		if (
 			Array.isArray(event.messages) &&
 			event.messages.some((m) => (m as { role?: unknown } | undefined)?.role === "user")
 		) {
 			ctx.ui.notify(
-				"watchdog: decision turn aborted; a message you sent may have been dropped, please resend",
+				"watchdog: the decision turn was interrupted; if the message you sent got no answer, please resend",
 				"warning",
 			);
 		}
@@ -251,51 +282,36 @@ function onAgentEnd(event: AgentEndEvent, ctx: ExtensionContext) {
 }
 
 /**
- * A message is saved: strip the decision reply (it says nothing useful and is folded anyway); copy it to
- * the card first so the TUI can still show it.
+ * Write down a real user message that landed inside a check turn.
+ *
+ * pi hands us the message, not the app message, so this is where we can see it: no customType, no
+ * watchdog marker, just a plain user row. Two things follow from it. The run really is still ours —
+ * a nudge is queued as `steer`, which pi delivers without ending the run — so `hasPendingMessages`
+ * reads false by the time the turn settles and cannot be asked. And the user is now ahead of us: the
+ * answer being computed is about a request they have already moved past, so the check must fold as
+ * `superseded` instead of sending a continuation on top of their message.
  */
 function onMessageEnd(event: MessageEndEvent) {
-	if (event.message.role !== "assistant") return;
-	const message = event.message as { content?: unknown; stopReason?: unknown; errorMessage?: unknown };
-	// stop_watchdog's abort can land as an empty "error" assistant message that the TUI paints red; clear it, since our abort is expected.
-	// Only "error", not "aborted": user ESC is "aborted" and rewriting it would break runWasAborted.
-	// The pending flag scopes this to the abort we just triggered, so real provider errors still show.
-	if (stopAbortPending && message.stopReason === "error") {
-		stopAbortPending = false;
-		return {
-			message: {
-				...event.message,
-				content: [],
-				stopReason: "stop",
-				errorMessage: undefined,
-			} as typeof event.message,
-		};
-	}
 	if (decisionWindow === null) return;
-	const content = message.content;
-	const hasToolCall =
-		Array.isArray(content) &&
-		content.some((block) => isRecord(block) && (block.type === "toolCall" || block.type === "tool_use"));
-	if (hasToolCall) decisionWindow.sawToolCall = true;
-	const text = textFromContent(content);
-	if (text) decisionWindow.replyText = text.slice(0, DECISION_REPLY_MAX_CHARS);
-	return {
-		message: {
-			...event.message,
-			content: hasToolCall ? (content as unknown[]).filter((block) => !(isRecord(block) && block.type === "text")) : [],
-		} as typeof event.message,
-	};
+	if ((event.message as { role?: unknown }).role !== "user") return;
+	decisionWindow.userInterjected = true;
 }
 
-/** Close the decision turn, then re-arm; close before the running check, since stop_watchdog already set running=false but still owes a fold marker. */
+/**
+ * Close the decision turn, then re-arm. A stop answer already set running=false; a continue answer only
+ * ended its turn, so the continuation below is what starts the real work.
+ *
+ * The turn was cut short by pi, not by us: the tool result carries `terminate: true`, so pi skips the
+ * follow-up model call and no abort is fired. Nothing here has to clean up after a phantom row.
+ */
 async function onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext) {
 	const window = decisionWindow;
 	decisionWindow = null;
-	stopAbortPending = false; // the aborted run has settled; a later real error must not be swallowed.
 	if (window !== null) {
 		// A decision turn is void (superseded) when the user jumped in, the turn isn't idle, or ESC hit.
 		// We must still drop a terminal marker, or the "keep until a marker" rule makes the decision prompt stick forever.
-		const superseded = !ctx.isIdle() || ctx.hasPendingMessages() || window.aborted === true;
+		const superseded =
+			!ctx.isIdle() || ctx.hasPendingMessages() || window.userInterjected === true || window.aborted === true;
 		const outcome = decisionOutcome(window, superseded);
 		// A check that never answered (provider error, or an empty reply) is retried by the next
 		// countdown, not on the spot: the timer re-arms and that check spends the next nudge from the
@@ -315,7 +331,7 @@ async function onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext) 
 				{ triggerTurn: false },
 			);
 		} else {
-			// No stop_watchdog call means work remains: send the continue message to start the real work turn.
+			// "continue" means work remains: send the continue message to start the real work turn.
 			// It is both the fold's end marker and the only kept message from the whole exchange.
 			pi.sendMessage(
 				{
@@ -328,13 +344,14 @@ async function onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext) 
 			);
 		}
 		// History record only: it gets a TUI renderer and stays for reading back, but never enters the model context.
-		// One entry per exchange, holding whatever the turn said. A stop leaves no reply, since the reply is cleared
-		// before it is saved and the wrap-up text ran before the tool call. A failed check keeps the provider error;
-		// an empty check has no reply to keep, so the card explains the silence instead.
+		// One entry per exchange. The reply is the note the AI passed to watchdog_decide, a failed check keeps the
+		// provider error, and a check that called nothing says so instead of pretending the model answered.
 		pi.appendEntry<DecisionCardData>(DECISION_ENTRY_TYPE, {
 			exchangeId: window.exchangeId,
 			outcome,
-			reply: window.replyText ?? (outcome === "empty" ? EMPTY_REPLY_NOTE : window.failureMessage || undefined),
+			reply: window.note ?? (outcome === "empty" ? EMPTY_REPLY_NOTE : window.failureMessage || undefined),
+			decision:
+				window.decision === DECISION_CONTINUE ? undefined : (window.decision as "done" | "wait_user" | undefined),
 			suspended: outcome === "stop" && state.suspended,
 			nudgeCount: state.nudgeCount,
 			maxNudges: state.maxNudges,
@@ -674,7 +691,7 @@ function sendDecision(ctx: ExtensionContext): boolean {
 	}
 	try {
 		const exchangeId = createExchangeId();
-		decisionWindow = { exchangeId, stopCalled: false };
+		decisionWindow = { exchangeId };
 		// display:true shows the collapsed check hint; details.exchangeId lets the context hook and the hint renderer find this exchange.
 		pi.sendMessage(
 			{
@@ -711,7 +728,7 @@ function startWatchdog(
 	// Once registered we never remove it, so the tools list stays stable for the prompt cache.
 	if (!toolRegistered) {
 		toolRegistered = true;
-		registerStopTool();
+		registerDecideTool();
 	}
 	// Allow a restart while running: reset settings and counters.
 	// Skip the brief running=false on purpose, so integrations don't think we finished and ring a bell.
@@ -757,26 +774,36 @@ function createExchangeId(): string {
 	return `w${Date.now().toString(36)}-${exchangeCounter}`;
 }
 
-/** True when the run was stopped: its last assistant message has stopReason "aborted" (ESC or another extension's abort). */
+/**
+ * True when the run was stopped: its last assistant message has stopReason "aborted" (ESC, or another
+ * extension's abort). The row it reads is the newest assistant message, never any assistant message: a run
+ * that ends because its tool batch terminated carries no "aborted" row at all, and a stop answer can leave
+ * an older tool-call row behind, so scanning the whole run would read an answered check as a user ESC.
+ */
 function runWasAborted(messages: unknown): boolean {
 	if (!Array.isArray(messages)) return false;
-	return messages.some((m) => {
-		const msg = m as { role?: unknown; stopReason?: unknown } | undefined;
-		return msg?.role === "assistant" && msg?.stopReason === "aborted";
-	});
+	for (let i = messages.length - 1; i >= 0; i -= 1) {
+		const msg = messages[i] as { role?: unknown; stopReason?: unknown } | undefined;
+		if (msg?.role !== "assistant") continue;
+		return msg.stopReason === "aborted";
+	}
+	return false;
 }
 
 /**
- * What a finished check settled on, most specific first: an answer, a turn the user took over, a dead
- * request, silence, or work remains. A provider error outranks silence, since an errored turn is empty too.
+ * What a finished check settled on, most specific first: a turn the user took over, the answer itself, a
+ * dead request, or nothing at all. Only the watchdog_decide call counts as an answer; text never does, which
+ * is the whole point of the redesign — a model that answers in prose gets no work turn, it gets silence.
+ *
+ * The answer outranks `failed` on purpose. A check is answered by a watchdog_decide call, so no run failure
+ * can produce that call; the ordering only matters for the pathological case where both look true, and the
+ * cost of being wrong must be a retried check, never a live answer thrown away.
  */
 function decisionOutcome(window: DecisionWindow, superseded: boolean): DecisionCardData["outcome"] {
-	if (window.stopCalled) return "stop";
 	if (superseded) return "superseded";
+	if (window.decision !== undefined) return window.decision === DECISION_CONTINUE ? "continue" : "stop";
 	if (window.failed === true) return "failed";
-	// No text and no tool block means the check came back silent; a tool block (even a blocked one) is an answer.
-	if (window.replyText === undefined && window.sawToolCall !== true) return "empty";
-	return "continue";
+	return "empty";
 }
 
 /**
@@ -849,6 +876,7 @@ function recordProactiveStop(stop: PendingProactiveStop) {
 		// The card and the fold marker share one id, so a card can be read next to the range it explains.
 		exchangeId: stop.exchangeId,
 		outcome: "stop",
+		decision: stop.decision,
 		proactive: true,
 		suspended: stop.suspended,
 		nudgeCount: stop.nudgeCount,
@@ -877,20 +905,41 @@ function markProactiveStop(stop: PendingProactiveStop) {
 	);
 }
 
-/** Register stop_watchdog; startWatchdog calls this on the first start. pi lets us register after startup. */
-function registerStopTool() {
+/**
+ * The one tool: answer a check, or stop on your own. Called from the check turn for all three answers, and
+ * from a normal work turn with "done"/"wait_user" for a proactive stop (a proactive "continue" says nothing).
+ * Registered once by startWatchdog; pi lets us register after startup.
+ */
+function registerDecideTool() {
 	pi.registerTool({
 		name: TOOL_NAME,
-		label: "Stop auto-continue",
-		description:
-			"Ends the turn immediately. Call it yourself once no work remains — no need to wait for a watchdog nudge; " +
-			"in keep mode this suspends monitoring until the user's next message.",
-		parameters: Type.Object({}),
+		label: "Watchdog decide",
+		description: TOOL_DESCRIPTION,
+		promptSnippet: TOOL_PROMPT_SNIPPET,
+		promptGuidelines: TOOL_PROMPT_GUIDELINES,
+		parameters: Type.Object({
+			decision: Type.Union([
+				Type.Literal(DECISION_CONTINUE),
+				Type.Literal(DECISION_DONE),
+				Type.Literal(DECISION_WAIT_USER),
+			]),
+			// The description carries the one-line rule: it rides along with every request, so the model sees
+			// it without paying an example round trip. The 200-char slice is only a backstop.
+			note: Type.Optional(
+				Type.String({
+					description:
+						"One short line for the user (under ~100 characters). It shows in the watchdog card; never a report or a deliverable.",
+				}),
+			),
+		}),
 		// The card already shows the content, so render nothing; a zero-line Text with renderShell "self" keeps the call/result lines blank.
 		renderShell: "self",
 		renderCall: () => new Text("", 0, 0),
 		renderResult: () => new Text("", 0, 0),
-		async execute(toolCallId, _params, _signal, _onUpdate, ctx) {
+		async execute(toolCallId, params, _signal, _onUpdate, ctx) {
+			const decision = params?.decision as Decision | undefined;
+			const note = typeof params?.note === "string" ? params.note.slice(0, DECISION_NOTE_MAX_CHARS) : undefined;
+			// Nothing to answer or stop when monitoring is off; a second call in one turn lands here too.
 			if (!state.running) {
 				return {
 					content: [
@@ -904,40 +953,77 @@ function registerStopTool() {
 					details: {},
 				};
 			}
-			// PI_WATCHDOG_ON_STOP hook: run an external command when stop_watchdog fires, e.g. touch an exit file or `tmux wait-for -S done` for a parent (subagent) to wait on.
-			const onStop = process.env.PI_WATCHDOG_ON_STOP?.trim();
-			if (onStop) {
-				spawn("sh", ["-c", onStop], { stdio: "ignore", detached: true }).unref();
+			// The check turn is open: this call is the answer. Guarded rather than trusted: pi validates the
+			// schema before execute, but the check turn runs with every other tool blocked, so a payload that
+			// slipped through must not be silently read as "no answer".
+			if (decisionWindow !== null) {
+				const window = decisionWindow; // keep the window we answered, even if a later send clears it
+				if (decision === undefined || !DECISIONS.includes(decision)) {
+					// Throw, not return isError: pi only marks a result as an error when execute() throws, and the
+					// model has to see this as a failure it can fix inside the same check turn.
+					throw new Error(
+						BAD_DECISION_NOTE +
+							(decision === undefined ? "" : ` Got ${JSON.stringify(decision)}.`) +
+							" This check is not answered yet — call again with a valid decision.",
+					);
+				}
+				window.decision = decision;
+				window.note = note;
+				if (decision === DECISION_CONTINUE) {
+					// Work remains: end this turn on the tool result, onAgentSettled sends the continuation. Ending
+					// the turn with terminate is what keeps the model from starting the work inside the check turn;
+					// it is not an abort, so no "request ended" row appears and the answer cannot read as a user ESC.
+					return { content: [{ type: "text", text: "Continuing in the next turn." }], details: {}, terminate: true };
+				}
+				// "done" / "wait_user": the check ends the watchdog's interest; the card and fold marker drop in agent_settled.
+				return stopWatchdog(toolCallId, decision, ctx);
 			}
-			// Soft stop: in keep mode this only pauses us until the user talks again.
-			teardown(ctx, false);
-			// A call inside the decision window means the result is stop; the fold marker and card drop in agent_settled.
-			if (decisionWindow !== null) decisionWindow.stopCalled = true;
-			else {
-				// No check turn: hold the record until the run settles, so the AI's wrap-up lands inside the folded range.
-				pendingProactiveStop = {
-					exchangeId: createExchangeId(),
-					toolCallId,
-					suspended: state.suspended,
-					nudgeCount: state.nudgeCount,
-				};
+
+			// No check turn: the AI is closing out on its own. "continue" has nothing to answer here.
+			if (decision === DECISION_CONTINUE) {
+				throw new Error(NOT_IN_CHECK_TURN_NOTE);
 			}
-			// Same as a user ESC (app.interrupt): after stop_watchdog the AI usually has only closing text or extra moves, so abort now to cut it off.
-			if (!ctx.isIdle()) {
-				stopAbortPending = true;
-				ctx.abort();
+			if (decision !== DECISION_DONE && decision !== DECISION_WAIT_USER) {
+				throw new Error(
+					`${BAD_DECISION_NOTE} Here, outside a check, only "${DECISION_DONE}" and "${DECISION_WAIT_USER}" do anything.`,
+				);
 			}
-			return {
-				content: [
-					{
-						type: "text",
-						text: "OK.",
-					},
-				],
-				details: {},
-			};
+			return stopWatchdog(toolCallId, decision, ctx);
 		},
 	});
+}
+
+/**
+ * The "stop" half of the tool, shared by a check answer and a proactive stop: soft-stop, remember what it
+ * was (proactive stops are recorded once the run settles, so the AI's wrap-up lands inside the folded
+ * range), then end the turn with a terminating tool result.
+ *
+ * `terminate: true` is what `ctx.abort()` used to do here: pi skips the follow-up model call after this
+ * batch, so no further moves ride along. Unlike an abort it never throws, so pi writes no synthesized
+ * "request ended" row. It does not erase text the model already streamed — a tool call only runs after its
+ * assistant message is complete — but that text stays inside the proactive stop's fold range either way, so
+ * nothing extra is paid for keeping it.
+ */
+function stopWatchdog(toolCallId: string, decision: StopDecision, ctx: ExtensionContext): AgentToolResult<unknown> {
+	// PI_WATCHDOG_ON_STOP hook: run an external command when the AI stops the watchdog, e.g. touch an exit file or `tmux wait-for -S done` for a parent (subagent) to wait on.
+	const onStop = process.env.PI_WATCHDOG_ON_STOP?.trim();
+	if (onStop) {
+		spawn("sh", ["-c", onStop], { stdio: "ignore", detached: true }).unref();
+	}
+	// Soft stop: in keep mode this only pauses us until the user talks again.
+	teardown(ctx, false);
+	if (decisionWindow === null) {
+		// No check turn: hold the record until the run settles. The marker has to be the last row of the turn
+		// it closes, and the card describes a stop that is over.
+		pendingProactiveStop = {
+			exchangeId: createExchangeId(),
+			toolCallId,
+			decision,
+			suspended: state.suspended,
+			nudgeCount: state.nudgeCount,
+		};
+	}
+	return { content: [{ type: "text", text: "OK." }], details: {}, terminate: true };
 }
 
 // ---------- the /watchdog command ----------
@@ -964,7 +1050,7 @@ function registerWatchdogCommand() {
 						ctx.ui.notify("watchdog: not running", "info");
 						break;
 					}
-					// stop always fully stops; pausing is only done by the AI calling stop_watchdog in keep mode.
+					// stop always fully stops; pausing is only done by the AI stopping in keep mode.
 					state.mode = "once";
 					teardown(ctx);
 					ctx.ui.notify("watchdog: monitoring stopped", "info");

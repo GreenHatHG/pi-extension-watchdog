@@ -77,11 +77,11 @@ it("a stop exchange is dropped together with the blocked tool pair", () => {
 		nudgeMsg(),
 		assistant([
 			{ type: "toolCall", id: "c1", name: "edit", arguments: {} }, // blocked
-			{ type: "toolCall", id: "cs", name: "stop_watchdog", arguments: {} },
+			{ type: "toolCall", id: "cs", name: "watchdog_decide", arguments: {} },
 			{ type: "text", text: "done" },
 		]),
 		toolResult("c1", "edit"),
-		toolResult("cs", "stop_watchdog"),
+		toolResult("cs", "watchdog_decide"),
 		foldMarker(),
 	];
 	expect(foldWatchdogContext(messages)).toEqual([user("task")]);
@@ -172,10 +172,10 @@ it("a proactive stop folds the run that ended at its marker, and keeps what came
 		user("task"),
 		assistant([
 			{ type: "toolCall", id: "c1", name: "edit", arguments: {} },
-			{ type: "toolCall", id: "cs", name: "stop_watchdog", arguments: {} },
+			{ type: "toolCall", id: "cs", name: "watchdog_decide", arguments: {} },
 		]),
 		toolResult("c1", "edit"),
-		toolResult("cs", "stop_watchdog"),
+		toolResult("cs", "watchdog_decide"),
 		stopMarker("w1", "cs"),
 		user("next thing"),
 	];
@@ -187,9 +187,9 @@ it("a proactive stop keeps the wrap-up text the AI wrote after the tool call out
 		user("task"),
 		assistant([
 			{ type: "text", text: "starting" },
-			{ type: "toolCall", id: "cs", name: "stop_watchdog", arguments: {} },
+			{ type: "toolCall", id: "cs", name: "watchdog_decide", arguments: {} },
 		]),
-		toolResult("cs", "stop_watchdog"),
+		toolResult("cs", "watchdog_decide"),
 		{ role: "assistant", content: [{ type: "text", text: "all done, here is the summary" }], stopReason: "aborted" },
 		stopMarker("w1", "cs"),
 	];
@@ -197,15 +197,15 @@ it("a proactive stop keeps the wrap-up text the AI wrote after the tool call out
 });
 
 it("a proactive stop whose tool call is gone (compacted) fails closed and keeps its rows", () => {
-	const messages = [user("task"), toolResult("cs", "stop_watchdog"), stopMarker("w1", "cs")];
+	const messages = [user("task"), toolResult("cs", "watchdog_decide"), stopMarker("w1", "cs")];
 	expect(foldWatchdogContext(messages)).toEqual(messages);
 });
 
 it("a stop marker without a tool call id is ignored, not guessed at", () => {
 	const messages = [
 		user("task"),
-		assistant([{ type: "toolCall", id: "cs", name: "stop_watchdog", arguments: {} }]),
-		toolResult("cs", "stop_watchdog"),
+		assistant([{ type: "toolCall", id: "cs", name: "watchdog_decide", arguments: {} }]),
+		toolResult("cs", "watchdog_decide"),
 		{ role: "custom", customType: STOP_MESSAGE_TYPE, content: "", display: false, details: { exchangeId: "w1" } },
 	];
 	expect(foldWatchdogContext(messages)).toEqual(messages);
@@ -231,12 +231,12 @@ it("context hook: after the decision turn the request view has no decision excha
 	expect(folded.filter((m) => m.role === "custom").map((m) => m.customType)).toEqual([CONTINUATION_MESSAGE_TYPE]);
 });
 
-it("context hook: after the AI calls stop_watchdog the whole decision exchange is removed", async () => {
+it("context hook: after the AI calls watchdog_decide the whole decision exchange is removed", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1 message=stop fold", rt.ctx);
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1100); // decision turn
-	await rt.tools.get("stop_watchdog").execute("t1", {}, undefined, undefined, rt.ctx);
+	await rt.tools.get("watchdog_decide").execute("t1", { decision: "done" }, undefined, undefined, rt.ctx);
 	await rt.settleAfterRun(); // decision turn ends → stop fold marker
 
 	const folded = (await rt.emitContext(rt.currentMessages())) as any[];
@@ -255,10 +255,10 @@ it("context hook: a proactive stop takes its own wrap-up out of the request view
 		role: "assistant",
 		content: [
 			{ type: "text", text: "all done" },
-			{ type: "toolCall", id: "cs", name: "stop_watchdog", arguments: {} },
+			{ type: "toolCall", id: "cs", name: "watchdog_decide", arguments: {} },
 		],
 	} as any);
-	await rt.tools.get("stop_watchdog").execute("cs", {}, undefined, undefined, rt.ctx);
+	await rt.tools.get("watchdog_decide").execute("cs", { decision: "done" }, undefined, undefined, rt.ctx);
 	rt.pushMessage({ role: "toolResult", toolCallId: "cs", content: [{ type: "text", text: "OK." }] });
 	await rt.settleAfterRun();
 
@@ -268,7 +268,7 @@ it("context hook: a proactive stop takes its own wrap-up out of the request view
 	expect(folded.some((m) => m.role === "user")).toBe(true); // the real conversation is untouched
 });
 
-it("inside the decision window every tool but stop_watchdog is blocked; after settling they pass again", async () => {
+it("inside the decision window every tool but watchdog_decide is blocked; after settling they pass again", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx);
 	await rt.settleAfterRun();
@@ -276,9 +276,12 @@ it("inside the decision window every tool but stop_watchdog is blocked; after se
 
 	const blocked = await rt.emitToolCall({ toolName: "bash", toolCallId: "c1", input: {} });
 	expect(blocked?.block).toBe(true);
-	expect(blocked?.reason).toContain("every tool except stop_watchdog is blocked");
+	// terminate rides along so a batch of [blocked tool, watchdog_decide] still ends the turn: a blocked call
+	// is not an answer, but it must not cost an extra model call either.
+	expect(blocked?.terminate).toBe(true);
+	expect(blocked?.reason).toContain("every tool except watchdog_decide is blocked");
 
-	const allowed = await rt.emitToolCall({ toolName: "stop_watchdog", toolCallId: "cs", input: {} });
+	const allowed = await rt.emitToolCall({ toolName: "watchdog_decide", toolCallId: "cs", input: {} });
 	expect(allowed).toBeUndefined();
 
 	await rt.settleAfterRun(); // settle the decision window
@@ -299,33 +302,48 @@ it("the continue message is sent only after the decision turn settles, and still
 	expect(continuationMessages(rt)[0].content).toBe(nudge("delayed send"));
 });
 
-it("the decision turn's model reply is cleared before saving; with a tool call only the tool call block stays", async () => {
+it("the check turn's text is left in the session, since the watchdog reads only the tool call", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx);
 	await rt.settleAfterRun();
 	await vi.advanceTimersByTimeAsync(1100); // decision turn opens
 
-	const ack = { role: "assistant", content: [{ type: "text", text: "ok, continuing" }], stopReason: "stop" };
-	const replaced = await rt.emitMessageEnd(ack);
-	expect(replaced?.message.content).toEqual([]);
-
-	const withTool = {
+	// No stripping any more: text is not a signal, so the turn can say what it likes. It folds away with
+	// the rest of the exchange, and it is the only record of why the model decided what it decided.
+	const withText = {
 		role: "assistant",
 		content: [
-			{ type: "thinking", thinking: "need to wrap up", signature: "sig" },
+			{ type: "thinking", thinking: "hmm", signature: "sig" },
 			{ type: "text", text: "all done" },
-			{ type: "toolCall", id: "cs", name: "stop_watchdog", arguments: {} },
 		],
 	};
-	const replacedWithTool = await rt.emitMessageEnd(withTool);
-	expect(replacedWithTool?.message.content).toEqual([
-		{ type: "thinking", thinking: "need to wrap up", signature: "sig" },
-		{ type: "toolCall", id: "cs", name: "stop_watchdog", arguments: {} },
-	]); // only text is stripped; toolCall / thinking stay (pairing and signature)
+	expect(await rt.emitMessageEnd(withText)).toBeUndefined();
 
-	await rt.settleAfterRun(); // decision window closes
+	await rt.settleAfterRun({ role: "assistant", content: [], stopReason: "stop" }); // decision window closes
 	const normal = { role: "assistant", content: [{ type: "text", text: "hi" }] };
-	expect(await rt.emitMessageEnd(normal)).toBeUndefined(); // normal turns are untouched again
+	expect(await rt.emitMessageEnd(normal)).toBeUndefined(); // normal turns were never touched either
+});
+
+it("a user message saved mid-check voids the check even when no queue is left to hint at it", async () => {
+	const rt = await setup();
+	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx);
+	await rt.settleAfterRun();
+	await vi.advanceTimersByTimeAsync(1100); // decision turn
+
+	// A nudge is delivered as steer, so a message the user types is answered INSIDE the same run: by the time
+	// the turn settles their queue is empty and hasPendingMessages() reads false. The saved user row is what
+	// tells us they took over, so a stale "continue" answer must not put a continuation on top of their turn.
+	await rt.emitMessageEnd({ role: "user", content: "actually, do this instead" });
+	await rt.settleAfterRun({
+		role: "assistant",
+		content: [{ type: "toolCall", id: "wc5", name: "watchdog_decide", arguments: { decision: "continue" } }],
+		stopReason: "toolUse",
+	});
+
+	expect(continuationMessages(rt)).toHaveLength(0); // the user is in charge, so the answer is void
+	expect(rt.customMessages.some((m) => m.customType === FOLD_MESSAGE_TYPE)).toBe(true);
+
+	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });
 
 it("a user interjection during the decision turn → the check is void, no continue message, the exchange still folds", async () => {
@@ -335,9 +353,13 @@ it("a user interjection during the decision turn → the check is void, no conti
 	await vi.advanceTimersByTimeAsync(1100); // decision turn
 
 	rt.state.pendingMessages = 1; // the user queued one message
-	await rt.settleAfterRun();
+	await rt.settleAfterRun({
+		role: "assistant",
+		content: [{ type: "toolCall", id: "wc4", name: "watchdog_decide", arguments: { decision: "continue" } }],
+		stopReason: "toolUse",
+	});
 
-	expect(continuationMessages(rt)).toHaveLength(0);
+	expect(continuationMessages(rt)).toHaveLength(0); // the user is in charge, so the answer is void
 	expect(rt.customMessages.some((m) => m.customType === FOLD_MESSAGE_TYPE)).toBe(true);
 	const folded = (await rt.emitContext(rt.currentMessages())) as any[];
 	expect(folded.some((m) => m.customType === DECISION_MESSAGE_TYPE)).toBe(false);

@@ -1,12 +1,12 @@
 /**
  * Mode policy: what an AI-initiated stop means, and whether a real user message wakes the watchdog.
- *   once  stop_watchdog shuts the watchdog down
- *   keep  stop_watchdog only puts it to sleep; the user's next message resumes it
+ *   once  watchdog_decide shuts the watchdog down
+ *   keep  watchdog_decide only puts it to sleep; the user's next message resumes it
  */
 export type WatchdogMode = "once" | "keep";
 
 export interface ModePolicy {
-	/** AI calls stop_watchdog: sleep (keep) or shut down (once). */
+	/** AI calls watchdog_decide: sleep (keep) or shut down (once). */
 	sleepsOnAiStop: boolean;
 	/** A real user message wakes a sleeping run. */
 	resumesOnUserMessage: boolean;
