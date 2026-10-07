@@ -73,9 +73,9 @@ export const TOOL_PROMPT_SNIPPET = `Answer the watchdog's idle check (${DECISION
 
 /** Guidelines appended to the default system prompt while the tool is active. */
 export const TOOL_PROMPT_GUIDELINES = [
-	`When the watchdog asks whether work remains, answer with a ${TOOL_NAME} call, never with text: "${DECISION_CONTINUE}" means keep going, ` +
+	`watchdog_decide: when the watchdog asks whether work remains, answer with the call, never with text: "${DECISION_CONTINUE}" means keep going, ` +
 		`"${DECISION_DONE}" means finished, "${DECISION_WAIT_USER}" means you are waiting on the user.`,
-	`Call ${TOOL_NAME} with "${DECISION_DONE}" yourself when the task is finished — you do not have to wait for a check.`,
+	`watchdog_decide: call it with "${DECISION_DONE}" yourself when the task is finished — you do not have to wait for a check.`,
 ];
 
 /** Returned when the tool is called outside a check turn to say "keep going": there is nothing to answer there. */
