@@ -199,17 +199,20 @@ export function createMockRuntime() {
 		const entry: any = { type: "message", id: `s${entrySeq}` };
 		sessionEntries.push(entry); // this run produced one session message
 		setLeaf(entry.id);
-		// Like real pi: the run's assistant message is saved first, then the run ends.
+		// Like real pi: the run's assistant message is saved first, then the run ends. The s-entry itself
+		// carries the assistant message, so currentMessages() exposes it like pi's session rows do.
 		const assistant = message ?? {
 			role: "assistant",
 			content: [{ type: "toolCall", id: "wc", name: "watchdog_decide", arguments: { decision: "continue" } }],
 			stopReason: "toolUse",
 		};
+		entry.message = assistant;
 		await emitMessageEnd(assistant);
 		await runToolBatch(assistant);
 		await emit("agent_end", { messages: [assistant] });
 		idle = true;
-		await emit("agent_settled");
+		// Like real pi, the settled event carries the run's messages, so a mistake scan can read the run.
+		await emit("agent_settled", { messages: [assistant] });
 	};
 
 	/**

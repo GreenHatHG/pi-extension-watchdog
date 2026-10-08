@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
 	DECISION_ENTRY_TYPE,
 	DECISION_MESSAGE,
+	DECISION_MESSAGE_TYPE,
 	EMPTY_REPLY_NOTE,
 	FOLD_MESSAGE_TYPE,
 	TOOL_NAME,
@@ -49,7 +50,75 @@ it("a 'continue' answer ends its turn with terminate, so nothing looks like a us
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });
 
-it("a check answered with text only is silence: no work turn, budget spent, countdown restarts", async () => {
+it("a text-only check is a mistake too: card names it, the next check carries the note, the text row stays", async () => {
+	const rt = await setup();
+	await rt.commands.get("watchdog").handler("timeout=1 max=3 message=text only", rt.ctx);
+	await rt.settleAfterRun();
+	await vi.advanceTimersByTimeAsync(1100); // check 1
+
+	// The model wrote a careful answer instead of calling watchdog_decide: a text answer never counts, and
+	// it is a mistake the next check should name — not a blanket "no answer".
+	await rt.settleAfterRun({
+		role: "assistant",
+		content: [{ type: "text", text: "still working" }],
+		stopReason: "stop",
+	});
+
+	expect(cards(rt)[0]).toMatchObject({
+		outcome: "empty",
+		reply: expect.stringContaining("answered with text instead of calling"),
+	});
+
+	await vi.advanceTimersByTimeAsync(1100); // check 2: names the text answer
+	const nudges = nudgeMessages(rt);
+	expect(nudges).toHaveLength(2);
+	expect((nudges[1] as { content: string }).content).toContain("your own mistake");
+	expect((nudges[1] as { content: string }).content).toContain("answered with text");
+
+	// The exchange folds, but the text row (the effort the model put in) stays visible as the evidence.
+	await rt.settleAfterRun(); // answer check 2 with watchdog_decide("continue")
+	const folded = (await rt.emitContext(rt.currentMessages())) as any[];
+	expect(folded.some((m) => m.customType === DECISION_MESSAGE_TYPE)).toBe(false);
+	expect(
+		folded.some(
+			(m) =>
+				m.role === "assistant" && Array.isArray(m.content) && m.content.some((b: any) => b.text === "still working"),
+		),
+	).toBe(true);
+
+	await rt.commands.get("watchdog").handler("stop", rt.ctx);
+});
+
+it("a mixed batch (blocked tool + an answer) folds whole: the next check carries no mistake note", async () => {
+	const rt = await setup();
+	await rt.commands.get("watchdog").handler("timeout=1 max=3 message=mixed", rt.ctx);
+	await rt.settleAfterRun();
+	await vi.advanceTimersByTimeAsync(1100); // check 1 opens
+
+	// The model reached for bash and also answered in the same batch: the answer wins, so the exchange
+	// folds whole — a mistake note would dangle with its evidence folded away.
+	await rt.emitToolCall({ toolName: "bash", toolCallId: "c1", input: {} });
+	await rt.settleAfterRun({
+		role: "assistant",
+		content: [
+			{ type: "toolCall", id: "c1", name: "bash", arguments: {} },
+			{ type: "toolCall", id: "wc1", name: TOOL_NAME, arguments: { decision: "continue" } },
+		],
+		stopReason: "toolUse",
+	});
+	// The continuation starts a real work turn; settle it before the next countdown can fire.
+	await rt.settleAfterRun({ role: "assistant", content: [{ type: "text", text: "working" }], stopReason: "stop" });
+
+	await vi.advanceTimersByTimeAsync(1100); // check 2
+	const nudges = nudgeMessages(rt);
+	expect(nudges).toHaveLength(2);
+	expect((nudges[1] as { content: string }).content).not.toContain("your own mistake");
+
+	await rt.settleAfterRun();
+	await rt.commands.get("watchdog").handler("stop", rt.ctx);
+});
+
+it("a text-only check still spends the budget and restarts the countdown", async () => {
 	const rt = await setup();
 	await rt.commands.get("watchdog").handler("timeout=1 max=3 message=text only", rt.ctx);
 	await rt.settleAfterRun();
@@ -64,9 +133,63 @@ it("a check answered with text only is silence: no work turn, budget spent, coun
 	});
 
 	expect(continuationMessages(rt)).toHaveLength(0);
-	expect(cards(rt)[0]).toMatchObject({ outcome: "empty", reply: EMPTY_REPLY_NOTE });
+	expect(cards(rt)[0]).toMatchObject({
+		outcome: "empty",
+		reply: expect.stringContaining("answered with text instead of calling"),
+	});
 	expect(rt.statusBars.get("watchdog")).toContain("1/3"); // the nudge was spent
 
+	await rt.commands.get("watchdog").handler("stop", rt.ctx);
+});
+
+it("a check where the model made a mistake keeps its row and names the mistake in the next check", async () => {
+	const rt = await setup();
+	await rt.commands.get("watchdog").handler("timeout=1 max=3 message=mistake", rt.ctx);
+	await rt.settleAfterRun();
+	await vi.advanceTimersByTimeAsync(1100); // check 1 opens
+
+	// The model reached for a wrong tool in the check turn: the block records the mistake.
+	const blocked = await rt.emitToolCall({ toolName: "bash", toolCallId: "c1", input: {} });
+	expect(blocked?.block).toBe(true);
+	await rt.settleAfterRun({ role: "assistant", content: [], stopReason: "stop" });
+
+	// The card says what the model actually did, not a blanket "no answer".
+	expect(cards(rt)[0]).toMatchObject({ outcome: "empty", reply: expect.stringContaining('tried to call "bash"') });
+
+	// And the next check's prompt names the mistake, so the model can learn from a failure it sees.
+	await vi.advanceTimersByTimeAsync(1100); // check 2 opens
+	const nudges = nudgeMessages(rt);
+	expect(nudges).toHaveLength(2);
+	expect((nudges[1] as { content: string }).content).toContain("your own mistake");
+	expect((nudges[1] as { content: string }).content).toContain('tried to call "bash"');
+
+	// The exchange folds, but the assistant row the mistake hangs off stays visible.
+	await rt.settleAfterRun(); // answer check 2 with watchdog_decide("continue")
+	// The exchange folds. The mistake run's assistant row is an empty placeholder (content: []), which is
+	// still the proof that a turn happened there — assert it survives the fold.
+	const folded = (await rt.emitContext(rt.currentMessages())) as any[];
+	expect(folded.some((m) => m.customType === DECISION_MESSAGE_TYPE)).toBe(false);
+	expect(folded.some((m) => m.role === "assistant")).toBe(true);
+
+	await rt.commands.get("watchdog").handler("stop", rt.ctx);
+});
+
+it("a clean empty check (no mistake, provider silence) folds whole with no mistake note", async () => {
+	const rt = await setup();
+	await rt.commands.get("watchdog").handler("timeout=1 max=3 message=clean empty", rt.ctx);
+	await rt.settleAfterRun();
+	await vi.advanceTimersByTimeAsync(1100); // check 1
+
+	// True provider silence: no text, no tool call, so the mistake stays undefined.
+	await rt.settleAfterRun({ role: "assistant", content: [], stopReason: "stop" });
+	expect(cards(rt)[0]).toMatchObject({ outcome: "empty", reply: EMPTY_REPLY_NOTE });
+
+	await vi.advanceTimersByTimeAsync(1100); // check 2: no mistake note appended
+	const nudges = nudgeMessages(rt);
+	expect(nudges).toHaveLength(2);
+	expect((nudges[1] as { content: string }).content).not.toContain("your own mistake");
+
+	await rt.settleAfterRun();
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
 });
 

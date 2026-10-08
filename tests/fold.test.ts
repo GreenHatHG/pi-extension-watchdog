@@ -33,12 +33,12 @@ const stopMarker = (exchangeId = EXCHANGE, toolCallId = "cs") => ({
 	display: false,
 	details: { exchangeId, toolCallId },
 });
-const foldMarker = (exchangeId = EXCHANGE, outcome = "stop") => ({
+const foldMarker = (exchangeId = EXCHANGE, outcome = "stop", mistake?: string) => ({
 	role: "custom",
 	customType: FOLD_MESSAGE_TYPE,
 	content: "",
 	display: false,
-	details: { exchangeId, outcome },
+	details: mistake === undefined ? { exchangeId, outcome } : { exchangeId, outcome, mistake },
 });
 const assistant = (content: unknown[]) => ({ role: "assistant", content });
 const toolResult = (toolCallId: string, toolName: string) => ({
@@ -209,6 +209,34 @@ it("a stop marker without a tool call id is ignored, not guessed at", () => {
 		{ role: "custom", customType: STOP_MESSAGE_TYPE, content: "", display: false, details: { exchangeId: "w1" } },
 	];
 	expect(foldWatchdogContext(messages)).toEqual(messages);
+});
+
+it("a mistake exchange keeps its assistant row in the request view", async () => {
+	const messages = [
+		user("task"),
+		nudgeMsg("e1"),
+		assistant([{ type: "toolCall", id: "c1", name: "bash", arguments: {} }]),
+		toolResult("c1", "bash"),
+		foldMarker("e1", "empty", 'tried to call "bash"'),
+		nudgeMsg("e2"),
+		assistant([{ type: "toolCall", id: "cs", name: "watchdog_decide", arguments: {} }]),
+		continuationMsg("e2"),
+	];
+	// The mistake run keeps its assistant row (the call and its result still go), so the next check's
+	// mistake note has its evidence next to it. A clean empty check folds whole instead.
+	const folded = foldWatchdogContext(messages) as any[];
+	expect(folded.some((m) => m.role === "assistant" && m.content?.[0]?.name === "bash")).toBe(true);
+	expect(folded.some((m) => m.role === "toolResult")).toBe(false);
+	expect(folded.some((m) => m.customType === DECISION_MESSAGE_TYPE && m.details.exchangeId === "e1")).toBe(false);
+	// The nudge for exchange 2 sat after the mistake's fold marker, so its own exchange never folds here.
+	// Actually it does: the e2 exchange runs to the continuation, which folds the nudge down to just that
+	// continuation — so no e2 nudge remains in view.
+	expect(folded.some((m) => m.customType === DECISION_MESSAGE_TYPE)).toBe(false);
+});
+
+it("a clean empty check still folds whole (no mistake on the marker)", async () => {
+	const messages = [user("task"), nudgeMsg(), assistant([{ type: "text", text: "still working" }]), foldMarker()];
+	expect(foldWatchdogContext(messages)).toEqual([user("task")]);
 });
 
 beforeEach(() => {

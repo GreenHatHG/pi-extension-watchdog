@@ -47,7 +47,7 @@ import { type DecisionCardData, registerDecisionCardRenderers } from "./decision
 import { expandedCardIds, expandedHintIds } from "./expanded.ts";
 import { registerWatchdogContextFolding } from "./fold.ts";
 import { MODE_POLICY, modeFromKeepAlive, type WatchdogMode } from "./mode.ts";
-import { isRestoredReason } from "./utils.ts";
+import { isRecord, isRestoredReason } from "./utils.ts";
 
 /** One decision exchange: from the nudge we send until that turn settles. */
 interface DecisionWindow {
@@ -64,6 +64,11 @@ interface DecisionWindow {
 	failed?: boolean;
 	/** Provider error text from that failure, kept for the history card. */
 	failureMessage?: string;
+	/**
+	 * The mistake the model made in this check: a wrong tool call or a text-only answer. Kept so the card
+	 * says what the model actually did, and so a retried check can show the model its own mistake.
+	 */
+	mistake?: string;
 }
 
 interface WatchdogState {
@@ -124,6 +129,8 @@ let unsubTerminalInput: (() => void) | null = null;
 /** Register watchdog_decide once and never remove it, to keep the prompt cache prefix stable. */
 let toolRegistered = false;
 let exchangeCounter = 0;
+/** The mistake the last check caught (wrong tool, text-only answer); shown once in the next check's prompt. */
+let lastMistake: string | undefined;
 
 /**
  * The proactive stop waiting to be written down: the tool ran, but the run it belongs to is not over yet.
@@ -236,6 +243,9 @@ function onAgentStart(_event: AgentStartEvent, ctx: ExtensionContext) {
 function onToolCall(event: ToolCallEvent): ToolCallEventResult | undefined {
 	if (decisionWindow === null) return;
 	if (event.toolName === TOOL_NAME) return;
+	// The model reached for a wrong tool in a check turn: record it, so the card and the next check can say
+	// what went wrong instead of a blanket "no answer".
+	decisionWindow.mistake = `tried to call "${event.toolName}" in the check turn — every tool except ${TOOL_NAME} is blocked there`;
 	return {
 		block: true,
 		terminate: true,
@@ -313,6 +323,20 @@ async function onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext) 
 		const superseded =
 			!ctx.isIdle() || ctx.hasPendingMessages() || window.userInterjected === true || window.aborted === true;
 		const outcome = decisionOutcome(window, superseded);
+		// A check answered with text but no tool call is a mistake too: the model wrote its delivery into a
+		// channel the watchdog ignores, so the answer never counted. Recorded here from the run's last
+		// assistant message (the same scan runError uses), because no tool_call hook fires for prose.
+		if (
+			outcome === "empty" &&
+			window.mistake === undefined &&
+			lastAssistantText(settledMessages(_event)) !== undefined
+		) {
+			window.mistake = `answered with text instead of calling ${TOOL_NAME} — text is not an answer`;
+		}
+		// A mistake (wrong tool, text-only answer) rides into the next check's prompt, so the model sees what
+		// it did wrong; kept only for an empty check, or the note would outlive the exchange it explains —
+		// an answered check folds whole, so its evidence is gone and the note would dangle without a referent.
+		if (outcome === "empty" && window.mistake !== undefined) lastMistake = window.mistake;
 		// A check that never answered (provider error, or an empty reply) is retried by the next
 		// countdown, not on the spot: the timer re-arms and that check spends the next nudge from the
 		// same max= budget (sendDecision caps and auto-stops).
@@ -326,6 +350,9 @@ async function onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext) 
 					details: {
 						exchangeId: window.exchangeId,
 						outcome,
+						// The mistake rides on the fold marker: folding reads it to keep the assistant row that
+						// carries the evidence, so the next check's mistake note has its proof in view.
+						...(outcome === "empty" && window.mistake !== undefined ? { mistake: window.mistake } : {}),
 					},
 				},
 				{ triggerTurn: false },
@@ -344,12 +371,14 @@ async function onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext) 
 			);
 		}
 		// History record only: it gets a TUI renderer and stays for reading back, but never enters the model context.
-		// One entry per exchange. The reply is the note the AI passed to watchdog_decide, a failed check keeps the
-		// provider error, and a check that called nothing says so instead of pretending the model answered.
+		// One entry per exchange. The reply is the note the AI passed to watchdog_decide; a failed check keeps the
+		// provider error, and a check where the model made a mistake says what it did instead of a blanket "no answer".
+		const reply =
+			window.note ?? window.mistake ?? (outcome === "empty" ? EMPTY_REPLY_NOTE : window.failureMessage || undefined);
 		pi.appendEntry<DecisionCardData>(DECISION_ENTRY_TYPE, {
 			exchangeId: window.exchangeId,
 			outcome,
-			reply: window.note ?? (outcome === "empty" ? EMPTY_REPLY_NOTE : window.failureMessage || undefined),
+			reply,
 			decision:
 				window.decision === DECISION_CONTINUE ? undefined : (window.decision as "done" | "wait_user" | undefined),
 			suspended: outcome === "stop" && state.suspended,
@@ -692,11 +721,17 @@ function sendDecision(ctx: ExtensionContext): boolean {
 	try {
 		const exchangeId = createExchangeId();
 		decisionWindow = { exchangeId };
+		// The previous check's mistake rides along in the prompt: the model cannot learn from a failure it
+		// never sees, and a fresh check with no mention of it is how the same mistake repeated twice.
+		const content = lastMistake
+			? `${DECISION_MESSAGE}\n\nYour last check went unanswered because of your own mistake: ${lastMistake}. This is a new check — answer it now.`
+			: DECISION_MESSAGE;
+		lastMistake = undefined; // one mention per check; a new mistake replaces it
 		// display:true shows the collapsed check hint; details.exchangeId lets the context hook and the hint renderer find this exchange.
 		pi.sendMessage(
 			{
 				customType: DECISION_MESSAGE_TYPE,
-				content: DECISION_MESSAGE,
+				content,
 				display: true,
 				details: { exchangeId },
 			},
@@ -741,6 +776,7 @@ function startWatchdog(
 	state.message = message;
 	if (maxNudges !== undefined) state.maxNudges = maxNudges;
 	state.nudgeCount = 0;
+	lastMistake = undefined; // a fresh run starts clean; a stale note would misname its first check
 	activeCtx = ctx;
 	startTicker();
 	ensureTerminalInputListener(ctx);
@@ -818,6 +854,28 @@ function runError(messages: unknown): string | undefined {
 		if (msg?.role !== "assistant") continue;
 		if (msg.stopReason !== "error") return undefined;
 		return typeof msg.errorMessage === "string" ? msg.errorMessage : "";
+	}
+	return undefined;
+}
+
+/** The run's messages from a settled event: pi wraps them in `messages`, so scan the wrapper if present. */
+function settledMessages(event: unknown): unknown {
+	if (isRecord(event) && Array.isArray(event.messages)) return event.messages;
+	return event;
+}
+
+function lastAssistantText(messages: unknown): string | undefined {
+	if (!Array.isArray(messages)) return undefined;
+	for (let i = messages.length - 1; i >= 0; i -= 1) {
+		const msg = messages[i] as { role?: unknown; content?: unknown } | undefined;
+		if (msg?.role !== "assistant") continue;
+		if (!Array.isArray(msg.content)) return undefined;
+		for (const block of msg.content as { type?: unknown; text?: unknown }[]) {
+			if (isRecord(block) && block.type === "text" && typeof block.text === "string" && block.text.trim()) {
+				return block.text;
+			}
+		}
+		return undefined;
 	}
 	return undefined;
 }

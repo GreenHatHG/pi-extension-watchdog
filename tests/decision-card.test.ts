@@ -162,15 +162,15 @@ it("the nudge message renders as a collapsed hint and shows the prompt only when
 	const collapsed = renderer!(message, { expanded: false }, theme).render(80).join("\n");
 	expect(collapsed).toContain("watchdog:"); // each card names its plugin
 	expect(collapsed).toContain("Sending decision message");
-	expect(collapsed).not.toContain("Watchdog check");
+	expect(collapsed).not.toContain("Automated watchdog check");
 
 	const expanded = renderer!(message, { expanded: true }, theme).render(80).join("\n");
 	expect(expanded).toContain("watchdog:");
-	expect(expanded).toContain("Watchdog check");
+	expect(expanded).toContain("Automated watchdog check");
 });
 
 it("the decision prompt names watchdog_decide as the only allowed tool, so it does not contradict itself", () => {
-	expect(DECISION_MESSAGE).toContain("every tool except watchdog_decide is blocked");
+	expect(DECISION_MESSAGE).toContain("Every tool except watchdog_decide is blocked");
 });
 
 it("a continue answer outside a check is refused by naming the state, not by denying the check exists", () => {
@@ -204,11 +204,11 @@ it("in fullscreen the hint expands on click and collapses on a second click", as
 	const view = hintView(rt, message);
 
 	expect(view.render(80).join("\n")).toContain("Sending decision message");
-	expect(view.render(80).join("\n")).not.toContain("Watchdog check");
+	expect(view.render(80).join("\n")).not.toContain("Automated watchdog check");
 	view.handleMouse(clickLeft);
-	expect(view.render(80).join("\n")).toContain("Watchdog check");
+	expect(view.render(80).join("\n")).toContain("Automated watchdog check");
 	view.handleMouse(clickLeft);
-	expect(view.render(80).join("\n")).not.toContain("Watchdog check");
+	expect(view.render(80).join("\n")).not.toContain("Automated watchdog check");
 });
 
 it("the saved card renders its outcome collapsed and the AI reply only when expanded", async () => {

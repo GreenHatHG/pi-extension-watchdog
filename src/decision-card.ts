@@ -1,6 +1,6 @@
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { Box, type Component, Text, type TuiMouseEvent } from "@earendil-works/pi-tui";
-import { DECISION_ENTRY_TYPE, DECISION_MESSAGE_TYPE } from "./constants.ts";
+import { DECISION_ENTRY_TYPE, DECISION_MESSAGE_TYPE, EMPTY_REPLY_NOTE } from "./constants.ts";
 import { expandedCardIds, expandedHintIds } from "./expanded.ts";
 
 /**
@@ -33,6 +33,9 @@ const OUTCOME_LABEL: Record<DecisionCardData["outcome"], string> = {
 	failed: "check failed, will retry",
 	empty: "no watchdog_decide call from model",
 };
+
+/** A check where the model made a mistake: the label calls it out instead of a blanket "no answer". */
+const MISTAKE_LABEL = "model mistake — check unanswered, will retry";
 
 /** A stop that is really a wait: the label tells the user what to do, not just what happened. */
 const WAIT_USER_LABEL = "waiting on you — reply to resume";
@@ -139,7 +142,13 @@ class DecisionCardComponent extends DecisionRow {
 		const paused =
 			this.data.outcome === "stop" && this.data.suspended ? ` ${theme.fg("dim", "· monitoring paused")}` : "";
 		const noCheck = this.data.proactive ? ` ${theme.fg("dim", "· no check")}` : "";
-		return `${theme.fg("muted", "⏱")} ${this.prefix(theme)}${theme.fg("accent", outcome)}${this.toggleHint(expanded)}${paused}${noCheck}`;
+		// A check with no watchdog_decide call is either a provider error ("check failed") or the model's own
+		// mistake (a wrong tool call or a text-only answer); the reply carries the detail either way.
+		const label =
+			this.data.outcome === "empty" && this.data.reply && !this.data.reply.startsWith(EMPTY_REPLY_NOTE)
+				? MISTAKE_LABEL
+				: outcome;
+		return `${theme.fg("muted", "⏱")} ${this.prefix(theme)}${theme.fg("accent", label)}${this.toggleHint(expanded)}${paused}${noCheck}`;
 	}
 }
 

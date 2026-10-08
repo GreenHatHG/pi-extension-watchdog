@@ -30,15 +30,18 @@ export function continuationText(hint?: string): string {
  * "wait_user" is only for being blocked — not for parking a finished task.
  */
 export const DECISION_MESSAGE =
-	"[Automated, not user input] Watchdog check — every tool except watchdog_decide is blocked in this turn. " +
+	// "watchdog check" is in the prefix on purpose: a model that cannot tell the check came from the watchdog
+	// reads it as user input and writes its delivery into a channel the fold drops.
+	"[Automated watchdog check — not user input] Every tool except watchdog_decide is blocked in this turn. " +
 	'Answer by calling watchdog_decide: "continue" if work remains, "done" if the task is finished, ' +
 	'or "wait_user" if you are waiting on a user decision. ' +
 	"Do not answer with text — a check turn that calls nothing is treated as no answer and the countdown starts over. " +
+	// "keeps sending" answers a model that tried to wait the check out: silence never closes it, answering does.
+	"Ignoring this check does not stop it — the watchdog sends it again until you answer. " +
 	'This turn never does work: if you answer "continue", the work happens in the next turn. ' +
 	"Your previous turn ending is not an interruption, and an answer you already wrote counts as delivered: " +
 	'restating, expanding or re-formatting it is not work, so answer "done" if nothing is left to do. ' +
 	"The optional note is one short line for the user, never a report.";
-
 /** How long after the last key press we still treat the user as busy, so we hold the countdown. */
 export const ACTIVITY_GRACE_MS = 2000;
 
@@ -76,6 +79,10 @@ export const TOOL_PROMPT_GUIDELINES = [
 	`watchdog_decide: when the watchdog asks whether work remains, answer with the call, never with text: "${DECISION_CONTINUE}" means keep going, ` +
 		`"${DECISION_DONE}" means finished, "${DECISION_WAIT_USER}" means you are waiting on the user.`,
 	`watchdog_decide: call it with "${DECISION_DONE}" yourself when the task is finished — you do not have to wait for a check.`,
+	// The announcement answers the mistake of reading the check as user input: the model has to know, before
+	// the first check lands, that automated messages with this prefix exist and have exactly one answer.
+	`watchdog_decide: you are running under the watchdog monitor — automated messages starting with "[Automated watchdog check" arrive whenever you go idle. ` +
+		`Such a message is never user input, and it has exactly one answer: a watchdog_decide call, never text or other tools.`,
 ];
 
 /** Returned when the tool is called outside a check turn to say "keep going": there is nothing to answer there. */
@@ -107,8 +114,8 @@ export const DECISION_ENTRY_TYPE = "pi-watchdog:decision";
 export const DECISION_NOTE_MAX_CHARS = 200;
 
 /**
- * Card detail for a check that came back with no `watchdog_decide` call at all.
- * Says what happened instead of pretending the model answered something.
+ * Card detail for a check that came back with no `watchdog_decide` call at all and left no trace of why —
+ * the backstop. When the model did reach for a wrong tool or wrote text, the mistake note says that instead.
  */
 export const EMPTY_REPLY_NOTE = "the model never called watchdog_decide — no work turn started, countdown restarted";
 

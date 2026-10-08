@@ -6,6 +6,8 @@
 
 ### 改变
 
+- **催促消息标明来源，system prompt 声明监督环境**：催促前缀从 `[Automated, not user input]` 改成 `[Automated watchdog check — not user input]`——原前缀完全没提 watchdog，模型没有任何线索把这条 custom_message 和监督机制关联起来，于是把它当用户输入、认认真真写长回复，写得越用心被折叠删得越多（实测：一次会话里连多次把催促当输入）。同时 `TOOL_PROMPT_GUIDELINES` 新增一条：声明模型运行在 watchdog 监督下、空闲时会收到 `[Automated watchdog check` 开头的自动消息，那种消息不是用户输入、唯一答案是一次 `watchdog_decide` 调用。决策提示另补一句「忽略这次检查不会让它停下，watchdog 会一直发直到你回答」——回应模型试图等检查过去的翻车。
+- **模型犯错的检查保留一行证据，并在下一次催促里点名错误**：以前模型在检查回合里调错工具、或只回文字时，整个交换（包括那条「你该调 watchdog_decide」的拦截报错）全部被折叠——重试的模型看到的是白纸，于是原样再犯（实测：同一个错误连犯两次）。现在：`onToolCall` 把被拦的工具名记进 `decisionWindow.mistake`；结果卡片改成 `model mistake — check unanswered, will retry`，展开可见「tried to call "bash"...」；折叠时**保留挂错误的 assistant 行**（干净的 provider 报错仍整段折叠，那条 prompt 没人回答、留着会粘住）；下一次催促在提示末尾点名「你上一次检查因为自己的错误没有回答：...」，只点名一次。
 - **检查是否还开着，现在由继续消息自己说**：`decisionWindow` 是插件进程内的状态，模型看不到；错过回合边界的模型会在工作回合里再调一次 `watchdog_decide(decision="continue")`，拿回一句「没有检查开着」，于是以为仍在检查回合、把刚交付过的回答重写一遍（实测：一轮里 2,115 字的报告 → 检查 → `continue` → 2,706 字的改版报告）。两处文案各补一句：继续消息开头声明「watchdog 检查已结束，这是普通工作回合，所有工具都可用」；决策提示声明「上一回合自己结束不算被中断，已经写出的回答就算交付过了，重写/扩写/换排版不是还有活，没活就答 `done`」。同时把「检查外调 `continue`」的退回文案从「没有检查开着」改成「检查已经答过了」——前者会让模型以为整次检查消失了。
 - **信号从「文字」改成工具调用：`stop_watchdog` 重命名为 `watchdog_decide(decision, note)`**。决策回合原来靠文字区分答案（“有文字 = 还有活”），但这把两个用途挤在同一个通道里：模型把文字当交付物，watchdog 把同一段文字当布尔信号、写完就折叠掉——模型写得越认真，删得越干净。而且模型想接着干活时没有任何正当工具可调，只能去撞被拦截的工具，撞不明白就按唯一的出口（`watchdog_decide`）停下。现在信号只有一个工具调用：
   - `decision: "continue"` → 还有活，watchdog 发继续消息开真正的工作回合；

@@ -87,9 +87,11 @@ it("a failed check drops a history card carrying the provider error, and folds t
 	expect(failed).toHaveLength(1);
 	expect(failed[0]).toMatchObject({ outcome: "failed", reply: "boom: connection reset" });
 
-	// The failed exchange still got its end marker, so it never lingers in the request view.
+	// The failed exchange still got its end marker, so it never lingers in the request view. The last
+	// assistant row is the run's error placeholder (no watchdog exchange ever reached this run), so the
+	// fold keeps it — real pi would keep it too, since the run itself produced it.
 	const folded = (await rt.emitContext(rt.currentMessages())) as any[];
-	expect(folded).toHaveLength(0);
+	expect(folded.filter((m: any) => m.role === "custom")).toHaveLength(0);
 	expect(rt.customMessages.some((m) => m.customType === FOLD_MESSAGE_TYPE && m.details.outcome === "failed")).toBe(
 		true,
 	);
@@ -109,8 +111,9 @@ it("an empty reply is treated like a failed check: card, fold marker, countdown,
 	expect(cards(rt)[0]).toMatchObject({ outcome: "empty", reply: EMPTY_REPLY_NOTE });
 	expect(rt.customMessages.some((m) => m.customType === FOLD_MESSAGE_TYPE && m.details.outcome === "empty")).toBe(true);
 	// The check still folds away, and the status bar went back to counting the same nudge budget.
+	// The run's own (empty) assistant row stays, like pi would keep it: it belongs to the run, not the exchange.
 	const folded = (await rt.emitContext(rt.currentMessages())) as any[];
-	expect(folded).toHaveLength(0);
+	expect(folded.filter((m: any) => m.role === "custom")).toHaveLength(0);
 	expect(rt.statusBars.get("watchdog")).toContain("1s");
 	expect(rt.statusBars.get("watchdog")).toContain("1/3");
 
@@ -143,7 +146,8 @@ it("a check turn that tries to work instead of answering counts as no answer", a
 		stopReason: "toolUse",
 	});
 
-	expect(cards(rt)[0]).toMatchObject({ outcome: "empty" });
+	// The card names the mistake: the reply shows the blocked tool call, not a blanket "no answer".
+	expect(cards(rt)[0]).toMatchObject({ outcome: "empty", reply: expect.stringContaining('tried to call "bash"') });
 	expect(continuationMessages(rt)).toHaveLength(0);
 
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);

@@ -84,6 +84,10 @@ export function foldWatchdogContext<T extends object>(messages: T[]): T[] {
 		if (exchangeId === undefined) continue;
 		let end = -1; // drop range [i, end)
 		let complete = false;
+		// The first assistant row of the exchange: when the fold marker says the model made a mistake, this
+		// row is the evidence and stays in view — the next check's prompt names the mistake next to it.
+		let assistantRow = -1;
+		let mistakeInMarker: string | undefined;
 		for (let j = i + 1; j < messages.length; j += 1) {
 			const message: unknown = messages[j];
 			if (isRecord(message) && message.role === "custom") {
@@ -93,14 +97,24 @@ export function foldWatchdogContext<T extends object>(messages: T[]): T[] {
 				} else if (sameExchange(message, FOLD_MESSAGE_TYPE, exchangeId)) {
 					end = j + 1; // drop the fold marker too
 					complete = true;
+					const details = (message as { details?: unknown }).details;
+					if (isRecord(details) && typeof details.mistake === "string" && details.mistake.length > 0) {
+						mistakeInMarker = details.mistake;
+					}
 				}
 				break; // other custom messages are a boundary; keep them
 			}
-			if (isRecord(message) && (message.role === "assistant" || message.role === "toolResult")) continue;
+			if (isRecord(message) && (message.role === "assistant" || message.role === "toolResult")) {
+				if (message.role === "assistant" && assistantRow < 0) assistantRow = j;
+				continue;
+			}
 			break; // real user messages, summaries: keep them
 		}
 		if (!complete || end < 0) continue; // no end marker yet: keep all, or the model loses the prompt
+		// A mistake check folds everything except the assistant row the mistake hangs off: the next check's
+		// prompt names that mistake, and the row next to it is the evidence. A clean empty check folds whole.
 		for (let k = i; k < end; k += 1) drop[k] = true;
+		if (mistakeInMarker !== undefined && assistantRow >= 0) drop[assistantRow] = false;
 		i = end - 1;
 	}
 	// Proactive stops last, so a decision turn's own range is settled before a stop looks back into it.
