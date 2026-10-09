@@ -146,6 +146,8 @@ interface PendingProactiveStop {
 	suspended: boolean;
 	/** Why the AI stopped: "done" or "wait_user". */
 	decision: StopDecision;
+	/** The short note the AI passed along, so the card can show it. Undefined when it wrote none. */
+	reply?: string;
 	nudgeCount: number;
 }
 let pendingProactiveStop: PendingProactiveStop | null = null;
@@ -943,6 +945,7 @@ function recordProactiveStop(stop: PendingProactiveStop) {
 		exchangeId: stop.exchangeId,
 		outcome: "stop",
 		decision: stop.decision,
+		reply: stop.reply,
 		proactive: true,
 		suspended: stop.suspended,
 		nudgeCount: stop.nudgeCount,
@@ -1042,7 +1045,7 @@ function registerDecideTool() {
 					return { content: [{ type: "text", text: "Continuing in the next turn." }], details: {}, terminate: true };
 				}
 				// "done" / "wait_user": the check ends the watchdog's interest; the card and fold marker drop in agent_settled.
-				return stopWatchdog(toolCallId, decision, ctx);
+				return stopWatchdog(toolCallId, decision, note, ctx);
 			}
 
 			// No check turn: the AI is closing out on its own. "continue" has nothing to answer here.
@@ -1054,7 +1057,7 @@ function registerDecideTool() {
 					`${BAD_DECISION_NOTE} Here, outside a check, only "${DECISION_DONE}" and "${DECISION_WAIT_USER}" do anything.`,
 				);
 			}
-			return stopWatchdog(toolCallId, decision, ctx);
+			return stopWatchdog(toolCallId, decision, note, ctx);
 		},
 	});
 }
@@ -1070,7 +1073,12 @@ function registerDecideTool() {
  * assistant message is complete — but that text stays inside the proactive stop's fold range either way, so
  * nothing extra is paid for keeping it.
  */
-function stopWatchdog(toolCallId: string, decision: StopDecision, ctx: ExtensionContext): AgentToolResult<unknown> {
+function stopWatchdog(
+	toolCallId: string,
+	decision: StopDecision,
+	note: string | undefined,
+	ctx: ExtensionContext,
+): AgentToolResult<unknown> {
 	// PI_WATCHDOG_ON_STOP hook: run an external command when the AI stops the watchdog, e.g. touch an exit file or `tmux wait-for -S done` for a parent (subagent) to wait on.
 	const onStop = process.env.PI_WATCHDOG_ON_STOP?.trim();
 	if (onStop) {
@@ -1085,6 +1093,7 @@ function stopWatchdog(toolCallId: string, decision: StopDecision, ctx: Extension
 			exchangeId: createExchangeId(),
 			toolCallId,
 			decision,
+			reply: note,
 			suspended: state.suspended,
 			nudgeCount: state.nudgeCount,
 		};

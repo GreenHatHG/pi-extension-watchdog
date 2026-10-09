@@ -57,6 +57,7 @@
 
 ### 修复
 
+- **主动收尾的卡片丢掉了 `note`，只有一行标题、点不开**：`note` 参数（`bd1298e`）只接进了「回答检查」那条分支——主动收尾走的是另一条路，`stopWatchdog()` 收不到它，`PendingProactiveStop` 也不带这个字段，于是 `recordProactiveStop()` 写出来的卡片 `reply` 为空，TUI 判定「没有可展开的内容」，连 `· click to expand` 都不画（实测：模型带了 note 的 `wait_user` 收尾，卡片上什么也点不出来；而同一会话里回答检查停下的那张卡就有 note）。现在 `note` 一路串到主动收尾的卡片里，标题仍带 `· no check`，点击展开就是那句短话。这条路上模型往往不写正文、只调工具，`note` 是它唯一留下的说明。
 - **同一进程的第二个会话拿不到工具**：`toolRegistered` 在 `8ce99c8` 拆分时被搬到了模块顶层，而 pi 只为新会话重跑插件工厂、不重载模块，于是下一个会话带着上一个会话的 `true` 开局，`startWatchdog` 跳过注册。该会话的工具表是空的，AI 看不到工具、`onToolCall` 的白名单永不命中，决策回合只能以 `continue` 收场，一路催到上限（实测 14 次）。现在改回 `427eff6` 的语义：开关留在模块层，但每次工厂执行时先重置为 `false`。
 - **决策提示不再自相矛盾**：原文写着「本回合不要用工具」，紧接着又要求「以 `watchdog_decide` 收尾」。现在提示词与拦截原因都改成「除 `watchdog_decide` 外的工具都被拦截」，与 `onToolCall` 的实际放行名单一致。
 - **会话替换（`/clear`、`/resume`、`/fork`）后不再触碰失效的旧 ctx**：`startWatchdog` 现在把新会话的 `ctx` 传给 `teardown`，`session_shutdown` 也会清空缓存的 `activeCtx`，修掉 `This extension ctx is stale after session replacement` 报错。

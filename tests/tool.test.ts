@@ -41,7 +41,9 @@ it("a proactive stop is recorded once its run settles, card and fold marker both
 	rt.state.idle = false; // AI is mid-run; no decision window is open
 	expect(cards(rt)).toHaveLength(0);
 
-	await rt.tools.get("watchdog_decide").execute("t1", { decision: "done" }, undefined, undefined, rt.ctx);
+	await rt.tools
+		.get("watchdog_decide")
+		.execute("t1", { decision: "done", note: "wrapping up the last bit" }, undefined, undefined, rt.ctx);
 	// Nothing yet: the wrap-up text queued behind the tool call has to land inside the folded range first.
 	expect(cards(rt)).toHaveLength(0);
 	expect(rt.customMessages.filter((m) => m.customType === STOP_MESSAGE_TYPE)).toHaveLength(0);
@@ -49,7 +51,14 @@ it("a proactive stop is recorded once its run settles, card and fold marker both
 	await rt.settleAfterRun();
 	const found = cards(rt);
 	expect(found).toHaveLength(1);
-	expect(found[0]).toMatchObject({ outcome: "stop", proactive: true, suspended: false, nudgeCount: 0 });
+	// The note survives a proactive stop too, or the card has nothing to expand.
+	expect(found[0]).toMatchObject({
+		outcome: "stop",
+		proactive: true,
+		suspended: false,
+		nudgeCount: 0,
+		reply: "wrapping up the last bit",
+	});
 
 	const markers = rt.customMessages.filter((m) => m.customType === STOP_MESSAGE_TYPE);
 	expect(markers).toHaveLength(1);

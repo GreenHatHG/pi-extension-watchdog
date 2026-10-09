@@ -289,6 +289,14 @@ it("a proactive stop card names the missing check instead of making one up", asy
 	expect(view).toContain("stopped on purpose");
 	expect(view).toContain("monitoring paused");
 	expect(view).toContain("no check"); // this stop came from no check turn, so do not imply one
+	expect(view).not.toContain("click to expand"); // no note, so there is nothing to open
+
+	// A proactive stop that did carry a note still offers the toggle, and the note is what it opens.
+	const withNote = cardView(rt, { ...data, reply: "handing it back to you" });
+	expect(withNote.render(80).join("\n")).toContain("click to expand");
+	expect(withNote.render(80).join("\n")).not.toContain("handing it back to you");
+	withNote.handleMouse(clickLeft);
+	expect(withNote.render(200).join("\n")).toContain("handing it back to you");
 });
 
 it("clicking a card expands it, and the open state survives a rebuilt component", async () => {
