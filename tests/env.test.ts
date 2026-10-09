@@ -67,6 +67,26 @@ it("PI_WATCHDOG=0 does not auto-start (and does not register the tool, saving to
 	expect(rt.activeTools.has("watchdog_decide")).toBe(false); // lazy: no start, no tool
 });
 
+it("/reload: env user is not auto-started again (no countdown, no tool until a manual /watchdog)", async () => {
+	process.env.PI_WATCHDOG = "timeout=1 message=env text";
+	const rt = await setup();
+	await rt.emit("session_start", { reason: "reload" });
+	expect(rt.notifications.some((n) => n.msg.includes("not auto-started after reload"))).toBe(true);
+	expect(rt.activeTools.has("watchdog_decide")).toBe(false); // lazy: no start, no tool
+
+	// no countdown either: the session did no work since the reload
+	await vi.advanceTimersByTimeAsync(5000);
+	expect(rt.sentMessages).toHaveLength(0);
+
+	// a manual /watchdog still works after the reload
+	await rt.commands.get("watchdog").handler("timeout=1", rt.ctx);
+	expect(rt.notifications.some((n) => n.msg.includes("monitoring started"))).toBe(true);
+	expect(rt.activeTools.has("watchdog_decide")).toBe(true);
+
+	await rt.settleAfterRun();
+	await rt.commands.get("watchdog").handler("stop", rt.ctx);
+});
+
 it("bad PI_WATCHDOG format: clear warning, no silent skip, no start", async () => {
 	process.env.PI_WATCHDOG = "30:100|oldDSL";
 	const rt = await setup();

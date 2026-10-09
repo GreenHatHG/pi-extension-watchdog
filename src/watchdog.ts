@@ -193,6 +193,14 @@ export default function (extensionApi: ExtensionAPI) {
 
 /** Session opened: auto-start when the env var asks for it. */
 function onSessionStart(event: SessionStartEvent, ctx: ExtensionContext) {
+	// Reload means a manual hot-reload mid-session: the watchdog was already shut down for it, and
+	// auto-restarting here would count down on a session that did no work yet. /watchdog starts it again.
+	if (event.reason === "reload") {
+		if (parseEnvConfig()?.ok) {
+			ctx.ui.notify("watchdog: not auto-started after reload; /watchdog to restart", "info");
+		}
+		return;
+	}
 	const envConfig = parseEnvConfig();
 	if (envConfig?.ok && !state.running) {
 		// Env start and the manual command share startWatchdog; folding is handled by the context hook either way.
