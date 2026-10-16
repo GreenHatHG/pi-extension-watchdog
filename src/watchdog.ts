@@ -33,6 +33,8 @@ import {
 	DEFAULT_TIMEOUT_SECONDS,
 	type Decision,
 	EMPTY_REPLY_NOTE,
+	type ExternalCheckAnswer,
+	type ExternalCheckEvent,
 	FOLD_MESSAGE_TYPE,
 	NOT_IN_CHECK_TURN_NOTE,
 	STATUS_KEY,
@@ -42,6 +44,8 @@ import {
 	TOOL_NAME,
 	TOOL_PROMPT_GUIDELINES,
 	TOOL_PROMPT_SNIPPET,
+	WATCHDOG_CHECK_EVENT,
+	WATCHDOG_STOPPED_EVENT,
 } from "./constants.ts";
 import { type DecisionCardData, registerDecisionCardRenderers } from "./decision-card.ts";
 import { expandedCardIds, expandedHintIds } from "./expanded.ts";
@@ -456,6 +460,15 @@ function publishState() {
 	});
 }
 
+/**
+ * Tell other extensions the watchdog is done for good: the nudge cap was hit, /watchdog stop ran, or a
+ * once-mode AI stop landed. Only full stops fire this, never a keep-mode nap — consumers should treat it
+ * as "the watchdog gave up or was asked to leave", e.g. a driver loop that must not wait on us forever.
+ */
+function publishStopped(reason: "max-reached" | "manual" | "ai-stop") {
+	pi.events.emit(WATCHDOG_STOPPED_EVENT, { reason, nudgeCount: state.nudgeCount, maxNudges: state.maxNudges });
+}
+
 function clearCountdown() {
 	if (state.timer) {
 		clearTimeout(state.timer);
@@ -725,8 +738,25 @@ function sendDecision(ctx: ExtensionContext): boolean {
 	if (state.nudgeCount > state.maxNudges) {
 		state.mode = "once"; // Hit the cap, so the run is stuck; stop even in keep mode.
 		teardown(ctx);
+		publishStopped("max-reached");
 		ctx.ui.notify(`watchdog: nudged ${state.maxNudges} times with no progress, auto-stopped`, "warning");
 		return false;
+	}
+	// Ask other extensions first: a listener (e.g. a driver loop with its own completion checks) answers
+	// in the synchronous emit, and its answer replaces the model check entirely. The answer is one shot
+	// per emit — the next countdown asks again, so a stale answer can never pin the watchdog down.
+	const answer = askExternalCheck();
+	if (answer) {
+		if (answer.decision === "done") {
+			// An external checker knows the work is over: no model check is needed to confirm what code
+			// just verified. Stop hard, like the cap path, so keep mode cannot nap and re-arm later.
+			state.mode = "once";
+			teardown(ctx);
+			publishStopped("ai-stop");
+			return false;
+		}
+		sendExternalContinuation(ctx, answer.message);
+		return true;
 	}
 	try {
 		const exchangeId = createExchangeId();
@@ -758,6 +788,50 @@ function sendDecision(ctx: ExtensionContext): boolean {
 	}
 	renderStatus(ctx);
 	return true;
+}
+
+/**
+ * Fire the external-check event and take the first valid answer. Handlers run synchronously inside the
+ * emit, so by the time this returns every listener has had its say. A handler without a valid answer
+ * just returns undefined and the built-in model check stays in charge.
+ */
+function askExternalCheck(): ExternalCheckAnswer | undefined {
+	// The answer travels in the payload: EventEmitter drops handler return values, so a writable
+	// `answer` slot on the event is the only channel a synchronous listener can reply through.
+	const event: ExternalCheckEvent = { nudgeCount: state.nudgeCount, maxNudges: state.maxNudges };
+	pi.events.emit(WATCHDOG_CHECK_EVENT, event);
+	const answer = event.answer;
+	if (!isRecord(answer)) return undefined;
+	const decision = (answer as { decision?: unknown }).decision;
+	if (decision !== "continue" && decision !== "done") return undefined;
+	const message = (answer as { message?: unknown }).message;
+	return { decision, message: typeof message === "string" && message.trim() ? message : undefined };
+}
+
+/**
+ * Send an external checker's continue instruction as the real work-turn message. Reuses the plain
+ * continuation type — no decision hint preceded it, so folding finds no range and keeps it whole,
+ * which is exactly right: it is a real instruction the model must see in later requests too.
+ */
+function sendExternalContinuation(ctx: ExtensionContext, message: string | undefined) {
+	try {
+		const content = message?.trim() || continuationText(state.message || undefined);
+		pi.sendMessage(
+			{
+				customType: CONTINUATION_MESSAGE_TYPE,
+				content,
+				display: true,
+				details: {},
+			},
+			{ triggerTurn: true, deliverAs: "followUp" },
+		);
+	} catch {
+		// Same stale-ctx story as the normal check path: the send failed, so stop for real instead of
+		// leaving a watchdog that fires on a dead session.
+		stopWithoutCtx();
+		return;
+	}
+	renderStatus(ctx);
 }
 
 /** Start watching: register the tool on first use, reset settings, then arm or wait. */
@@ -1087,6 +1161,7 @@ function stopWatchdog(
 	}
 	// Soft stop: in keep mode this only pauses us until the user talks again.
 	teardown(ctx, false);
+	if (!state.suspended) publishStopped("ai-stop");
 	if (decisionWindow === null) {
 		// No check turn: hold the record until the run settles. The marker has to be the last row of the turn
 		// it closes, and the card describes a stop that is over.
@@ -1119,6 +1194,7 @@ function registerWatchdogCommand() {
 					if (state.suspended && !state.running) {
 						state.mode = "once";
 						teardown(ctx);
+						publishStopped("manual");
 						ctx.ui.notify("watchdog: keep-mode monitoring fully off", "info");
 						break;
 					}
@@ -1129,6 +1205,7 @@ function registerWatchdogCommand() {
 					// stop always fully stops; pausing is only done by the AI stopping in keep mode.
 					state.mode = "once";
 					teardown(ctx);
+					publishStopped("manual");
 					ctx.ui.notify("watchdog: monitoring stopped", "info");
 					break;
 				}

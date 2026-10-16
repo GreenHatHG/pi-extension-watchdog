@@ -111,6 +111,31 @@ export const STOP_MESSAGE_TYPE = "pi-watchdog:stopped";
 /** Decision result: session-history record only (no TUI renderer, no context). */
 export const DECISION_ENTRY_TYPE = "pi-watchdog:decision";
 /**
+ * External check: fired just before a decision check goes to the model. Another extension answers it
+ * synchronously (optional, one shot) by writing to `answer` — EventEmitter drops handler return values,
+ * so the event payload carries a mutable slot: { answer: { decision: "continue", message? } } for a
+ * continue with a real instruction, or { answer: { decision: "done" } } to stop the watchdog outright.
+ * Writing nothing keeps the built-in model check. Purely generic — no goal-specific concepts here.
+ */
+export const WATCHDOG_CHECK_EVENT = "watchdog:check";
+/** Fired once when the watchdog stops for good (max reached, /watchdog stop, AI stop in once mode). */
+export const WATCHDOG_STOPPED_EVENT = "watchdog:stopped";
+
+/** The answer shape another extension writes into a `watchdog:check` payload. */
+export interface ExternalCheckAnswer {
+	decision: "continue" | "done";
+	/** For "continue": the actual instruction sent to the model, e.g. "you still owe a commit". */
+	message?: string;
+}
+
+/** Payload the watchdog emits on `watchdog:check`; `answer` starts empty, a consumer fills it in. */
+export interface ExternalCheckEvent {
+	nudgeCount: number;
+	maxNudges: number;
+	answer?: ExternalCheckAnswer;
+}
+
+/**
  * Max note chars kept in the history record. The tool asks for one short line; this is only the
  * backstop, so a model that writes an essay gets truncated instead of blowing up the session file.
  */
