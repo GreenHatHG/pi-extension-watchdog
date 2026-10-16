@@ -9,7 +9,7 @@ export const DEFAULT_MESSAGE =
 	// The "check is over" opener is here for the same reason one step earlier: a model that never learned the
 	// check closed keeps answering it (a second watchdog_decide, "I'm in a check turn") instead of working.
 	"If waiting on a user decision, don't change code — state what you need in one line, don't restate an answer you already delivered, then call watchdog_decide with decision \"wait_user\" as your final action. " +
-	'If no work remains and no decision is pending, call watchdog_decide with decision "done" to end the turn.';
+	'If no work remains and no decision is pending, call watchdog_decide with decision "done" to end the turn — but only after your final answer is out as a normal text message; output sitting in a tool result is not delivered.';
 
 /** Build the continue message: fixed trigger line plus any extra order. */
 export function continuationText(hint?: string): string {
@@ -41,6 +41,7 @@ export const DECISION_MESSAGE =
 	'This turn never does work: if you answer "continue", the work happens in the next turn. ' +
 	"Your previous turn ending is not an interruption, and an answer you already wrote counts as delivered: " +
 	'restating, expanding or re-formatting it is not work, so answer "done" if nothing is left to do. ' +
+	'An answer not yet sent to the user is still work — answer "continue" and deliver it in the next turn. ' +
 	"The optional note is one short line for the user, never a report.";
 /** How long after the last key press we still treat the user as busy, so we hold the countdown. */
 export const ACTIVITY_GRACE_MS = 2000;
@@ -67,7 +68,9 @@ export const TOOL_DESCRIPTION =
 	`(work remains), "${DECISION_DONE}" (the task is finished), or "${DECISION_WAIT_USER}" (you are waiting on the user). ` +
 	`Do not answer a check with text.\n` +
 	`- Outside a check turn you may call it with "${DECISION_DONE}" or "${DECISION_WAIT_USER}" to stop the auto-continue ` +
-	`watchdog yourself once you are really done; in keep mode that only pauses it until the user's next message.\n` +
+	`watchdog yourself once you are really done; in keep mode that only pauses it until the user's next message. ` +
+	`Before calling either, your final answer must already be out as a normal text message to the user — ` +
+	`output that only sits in a tool result is not delivered, and an answer not yet sent is still work: send it first, then call.\n` +
 	`- The optional note is one short line for the user (under ~100 characters), shown in the watchdog card. ` +
 	`Never put a report, a summary, or any deliverable in it.`;
 

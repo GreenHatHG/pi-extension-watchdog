@@ -997,7 +997,8 @@ function registerDecideTool() {
 			note: Type.Optional(
 				Type.String({
 					description:
-						"One short line for the user (under ~100 characters). It shows in the watchdog card; never a report or a deliverable.",
+						"One short line for the user (under ~100 characters). It shows in the watchdog card; never a report or a deliverable — " +
+						"it is not where your conclusion goes, that belongs in a normal text message.",
 				}),
 			),
 		}),
