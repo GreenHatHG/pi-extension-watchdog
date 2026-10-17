@@ -6,6 +6,7 @@
 
 ### 改变
 
+- **连续空回复在卡片上显示连击数，并在第 3 次时提醒用户**：模型一声不吭（没有 `watchdog_decide`、没有文字）的检查以前每张卡片都长一样，模型真的坏了时用户只能看它把 `max=` 预算静默烧完。现在：真静默的空回复按会话累计连击，从第 2 次起卡片尾追加 `· N in a row`，一眼分辨偶发毛刺和死循环；连击满 3 弹一条 warning（「model looks broken; /watchdog stop」），只弹一次。只有真静默才计数——模型犯别的错（调错工具/只回文字，下一次检查的 prompt 会点名错误）和 provider 报错都不算，有真实回答或开始新会话就清零。prompt 路径不变，重复的检查提示仍逐字节一致。
 - **`/reload` 后不再自动重启监控**：reload 的 `session_start` 原来和普通启动走同一条路——只要设了 `PI_WATCHDOG`，就会立刻开始倒计时，而 reload 之间没有任何真实工作，倒计时只会空转。现在 `reason: "reload"` 直接跳过自动启动（发一条 info 提示），需要的话手动 `/watchdog` 重启；resume/fork 的「等首次 `agent_settled` 再计时」语义不变。
 - **催促消息标明来源，system prompt 声明监督环境**：催促前缀从 `[Automated, not user input]` 改成 `[Automated watchdog check — not user input]`——原前缀完全没提 watchdog，模型没有任何线索把这条 custom_message 和监督机制关联起来，于是把它当用户输入、认认真真写长回复，写得越用心被折叠删得越多（实测：一次会话里连多次把催促当输入）。同时 `TOOL_PROMPT_GUIDELINES` 新增一条：声明模型运行在 watchdog 监督下、空闲时会收到 `[Automated watchdog check` 开头的自动消息，那种消息不是用户输入、唯一答案是一次 `watchdog_decide` 调用。决策提示另补一句「忽略这次检查不会让它停下，watchdog 会一直发直到你回答」——回应模型试图等检查过去的翻车。
 - **模型犯错的检查保留一行证据，并在下一次催促里点名错误**：以前模型在检查回合里调错工具、或只回文字时，整个交换（包括那条「你该调 watchdog_decide」的拦截报错）全部被折叠——重试的模型看到的是白纸，于是原样再犯（实测：同一个错误连犯两次）。现在：`onToolCall` 把被拦的工具名记进 `decisionWindow.mistake`；结果卡片改成 `model mistake — check unanswered, will retry`，展开可见「tried to call "bash"...」；折叠时**保留挂错误的 assistant 行**（干净的 provider 报错仍整段折叠，那条 prompt 没人回答、留着会粘住）；下一次催促在提示末尾点名「你上一次检查因为自己的错误没有回答：...」，只点名一次。

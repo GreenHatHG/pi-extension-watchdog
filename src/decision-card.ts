@@ -18,6 +18,8 @@ export interface DecisionCardData {
 	decision?: "done" | "wait_user";
 	/** outcome=stop in keep mode: monitoring only paused, the next user message resumes it. */
 	suspended?: boolean;
+	/** Silent-model streak: set on an outcome=empty card when the model sent nothing at all, checks in a row. */
+	emptyStreak?: number;
 	/** The AI stopped the watchdog itself, mid-turn: there was no check turn, so the row says so. */
 	proactive?: boolean;
 	nudgeCount: number;
@@ -143,12 +145,18 @@ class DecisionCardComponent extends DecisionRow {
 			this.data.outcome === "stop" && this.data.suspended ? ` ${theme.fg("dim", "· monitoring paused")}` : "";
 		const noCheck = this.data.proactive ? ` ${theme.fg("dim", "· no check")}` : "";
 		// A check with no watchdog_decide call is either a provider error ("check failed") or the model's own
-		// mistake (a wrong tool call or a text-only answer); the reply carries the detail either way.
+		// mistake (a wrong tool call or a text-only answer); the reply carries the detail either way. A truly
+		// silent reply with a streak shows how many checks in a row the model sent nothing — one glitch reads
+		// like the plain label, two or more reads like the broken model it is.
+		const streakSuffix =
+			this.data.outcome === "empty" && this.data.emptyStreak && this.data.emptyStreak > 1
+				? ` ${theme.fg("dim", `· ${this.data.emptyStreak} in a row`)}`
+				: "";
 		const label =
 			this.data.outcome === "empty" && this.data.reply && !this.data.reply.startsWith(EMPTY_REPLY_NOTE)
 				? MISTAKE_LABEL
 				: outcome;
-		return `${theme.fg("muted", "⏱")} ${this.prefix(theme)}${theme.fg("accent", label)}${this.toggleHint(expanded)}${paused}${noCheck}`;
+		return `${theme.fg("muted", "⏱")} ${this.prefix(theme)}${theme.fg("accent", label)}${streakSuffix}${this.toggleHint(expanded)}${paused}${noCheck}`;
 	}
 }
 

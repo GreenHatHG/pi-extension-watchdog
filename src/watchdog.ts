@@ -156,12 +156,18 @@ interface PendingProactiveStop {
 }
 let pendingProactiveStop: PendingProactiveStop | null = null;
 
+/** Back-to-back empty replies from the model; the card shows the streak, and a warning fires at the threshold. */
+let emptyStreak = 0;
+/** After this many silent checks in a row, tell the user the model looks broken. */
+const EMPTY_STREAK_WARN = 3;
+
 export default function (extensionApi: ExtensionAPI) {
 	pi = extensionApi;
 	// pi re-runs this factory for every new session but keeps the module cached, so clear the flag here.
 	// Left alone it would carry the previous session's registration into this one, whose tool table is empty,
 	// and startWatchdog would skip registerDecideTool, leaving the AI without watchdog_decide.
 	toolRegistered = false;
+	emptyStreak = 0;
 	// Same reason: a stop whose run never settled must not follow us into the new session.
 	pendingProactiveStop = null;
 
@@ -389,6 +395,21 @@ async function onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext) 
 		// provider error, and a check where the model made a mistake says what it did instead of a blanket "no answer".
 		const reply =
 			window.note ?? window.mistake ?? (outcome === "empty" ? EMPTY_REPLY_NOTE : window.failureMessage || undefined);
+		// Only true silence counts toward the streak: a mistake means the check's prompt changes next time
+		// (the model sees its mistake), and failed means the provider died — neither is "the model went quiet".
+		let streak: number | undefined;
+		if (outcome === "empty" && window.mistake === undefined) {
+			emptyStreak += 1;
+			streak = emptyStreak;
+			if (emptyStreak === EMPTY_STREAK_WARN) {
+				ctx.ui.notify(
+					`watchdog: the model replied empty ${EMPTY_STREAK_WARN} checks in a row — it looks broken; /watchdog stop if this is a loop`,
+					"warning",
+				);
+			}
+		} else if (outcome !== "failed") {
+			emptyStreak = 0;
+		}
 		pi.appendEntry<DecisionCardData>(DECISION_ENTRY_TYPE, {
 			exchangeId: window.exchangeId,
 			outcome,
@@ -396,6 +417,7 @@ async function onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext) 
 			decision:
 				window.decision === DECISION_CONTINUE ? undefined : (window.decision as "done" | "wait_user" | undefined),
 			suspended: outcome === "stop" && state.suspended,
+			...(streak !== undefined ? { emptyStreak: streak } : {}),
 			nudgeCount: state.nudgeCount,
 			maxNudges: state.maxNudges,
 			ts: Date.now(),

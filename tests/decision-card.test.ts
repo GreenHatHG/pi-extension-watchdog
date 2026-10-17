@@ -273,6 +273,59 @@ it("an empty reply renders its own outcome and explains itself when expanded", a
 	expect(expanded).toContain(EMPTY_REPLY_NOTE);
 });
 
+it("a silent streak shows on the card from the second empty reply on", async () => {
+	const rt = await setup();
+	const base: DecisionCardData = {
+		exchangeId: "w1",
+		outcome: "empty",
+		reply: EMPTY_REPLY_NOTE,
+		nudgeCount: 1,
+		maxNudges: 50,
+		ts: 0,
+	};
+
+	// The first silence reads like a one-off glitch: no streak suffix.
+	const first = cardView(rt, base).render(120).join("\n");
+	expect(first).toContain("no watchdog_decide call from model");
+	expect(first).not.toContain("in a row");
+
+	// From the second silence on, the card says how many checks went unanswered in a row.
+	const third = cardView(rt, { ...base, emptyStreak: 3 }, "e2")
+		.render(120)
+		.join("\n");
+	expect(third).toContain("3 in a row");
+});
+
+it("three silent checks in a row warn the user, and any real answer resets the streak", async () => {
+	const rt = await setup();
+	await rt.commands.get("watchdog").handler("timeout=1 max=5 message=silent", rt.ctx);
+	await rt.settleAfterRun();
+
+	// Three checks in a row answered with nothing at all.
+	for (let i = 1; i <= 3; i += 1) {
+		await vi.advanceTimersByTimeAsync(1100); // check i opens
+		await rt.settleAfterRun({ role: "assistant", content: [], stopReason: "stop" });
+		expect(cards(rt)).toHaveLength(i);
+	}
+	expect(rt.notifications.some((n) => n.msg.includes("3 checks in a row"))).toBe(true);
+
+	// The streak rides on each empty card, so the timeline shows the loop as it grows.
+	expect(cards(rt).map((c) => c.emptyStreak)).toEqual([1, 2, 3]);
+
+	// A mistake is not silence: the check prompt changes for it, so the streak starts over.
+	await vi.advanceTimersByTimeAsync(1100); // check 4 opens
+	await rt.emitToolCall({ toolName: "bash", toolCallId: "c1", input: {} });
+	await rt.settleAfterRun({ role: "assistant", content: [], stopReason: "stop" });
+	expect(cards(rt)[3]).toMatchObject({ outcome: "empty" });
+	expect(cards(rt)[3].emptyStreak).toBeUndefined();
+
+	// A real answer clears the streak too.
+	await vi.advanceTimersByTimeAsync(1100); // check 5 opens
+	await rt.settleAfterRun();
+	expect(cards(rt)[4].outcome).toBe("continue");
+	await rt.commands.get("watchdog").handler("stop", rt.ctx);
+});
+
 it("a proactive stop card names the missing check instead of making one up", async () => {
 	const rt = await setup();
 	const data: DecisionCardData = {
