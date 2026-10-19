@@ -44,6 +44,7 @@ import {
 	TOOL_NAME,
 	TOOL_PROMPT_GUIDELINES,
 	TOOL_PROMPT_SNIPPET,
+	UNDELIVERED_STOP_NOTE,
 	WATCHDOG_CHECK_EVENT,
 	WATCHDOG_STOPPED_EVENT,
 } from "./constants.ts";
@@ -156,6 +157,9 @@ interface PendingProactiveStop {
 }
 let pendingProactiveStop: PendingProactiveStop | null = null;
 
+/** Set after we threw once at a silent proactive stop in this run; the next one fails open. */
+let silentStopWarned = false;
+
 /** Back-to-back empty replies from the model; the card shows the streak, and a warning fires at the threshold. */
 let emptyStreak = 0;
 /** After this many silent checks in a row, tell the user the model looks broken. */
@@ -168,6 +172,7 @@ export default function (extensionApi: ExtensionAPI) {
 	// and startWatchdog would skip registerDecideTool, leaving the AI without watchdog_decide.
 	toolRegistered = false;
 	emptyStreak = 0;
+	silentStopWarned = false;
 	// Same reason: a stop whose run never settled must not follow us into the new session.
 	pendingProactiveStop = null;
 
@@ -245,6 +250,7 @@ function onAgentStart(_event: AgentStartEvent, ctx: ExtensionContext) {
 	activeCtx = ctx;
 	state.pausedByInput = false;
 	state.pausedByActivity = false;
+	silentStopWarned = false; // A new run gets its own one warn.
 	// Don't clear `interrupted` here: a run can be started by another extension, so only a real user message clears it.
 	clearCountdown();
 	renderStatus(ctx);
@@ -986,6 +992,35 @@ function lastAssistantText(messages: unknown): string | undefined {
 	return undefined;
 }
 
+/**
+ * Did the assistant message that carries this tool call also say something? pi saves the assistant
+ * message before its tool batch runs, so the branch already holds it at execute time; the mock mirrors
+ * that order. Scanning backwards for the matching toolCallId, so a retried run can't fool the scan.
+ */
+function turnCarriesText(toolCallId: string, ctx: ExtensionContext): boolean {
+	try {
+		const branch = ctx.sessionManager.getBranch();
+		for (let i = branch.length - 1; i >= 0; i -= 1) {
+			const entry = branch[i] as { type?: unknown; message?: unknown } | undefined;
+			if (entry?.type !== "message") continue;
+			const msg = entry.message as { role?: unknown; content?: unknown } | undefined;
+			if (msg?.role !== "assistant" || !Array.isArray(msg.content)) continue;
+			if (
+				!(msg.content as { type?: unknown; id?: unknown }[]).some(
+					(b) => isRecord(b) && (b.type === "toolCall" || b.type === "tool_use") && b.id === toolCallId,
+				)
+			)
+				continue;
+			return (msg.content as { type?: unknown; text?: unknown }[]).some(
+				(b) => isRecord(b) && b.type === "text" && typeof b.text === "string" && b.text.trim().length > 0,
+			);
+		}
+		return true; // Message not found: fail open, never block a stop on a guess.
+	} catch {
+		return true;
+	}
+}
+
 /** Does the session already have messages? Tells a brand-new session apart. */
 function hasMessages(ctx: ExtensionContext): boolean {
 	try {
@@ -1153,6 +1188,11 @@ function registerDecideTool() {
 				throw new Error(
 					`${BAD_DECISION_NOTE} Here, outside a check, only "${DECISION_DONE}" and "${DECISION_WAIT_USER}" do anything.`,
 				);
+			}
+			// A silent proactive stop reads as "conclusion left in a tool result"; nudge once, then fail open.
+			if (!silentStopWarned && !turnCarriesText(toolCallId, ctx)) {
+				silentStopWarned = true;
+				throw new Error(UNDELIVERED_STOP_NOTE);
 			}
 			return stopWatchdog(toolCallId, decision, note, ctx);
 		},

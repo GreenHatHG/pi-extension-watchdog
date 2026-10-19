@@ -113,6 +113,49 @@ it("a real provider error outside the decision window is left untouched", async 
 	expect(real).toBeUndefined(); // no rewrite, so the error still reaches the TUI
 });
 
+it("a silent proactive stop is thrown back once to remind the model to deliver, then fails open", async () => {
+	const rt = await setup();
+	await rt.commands.get("watchdog").handler("timeout=60", rt.ctx);
+	rt.state.idle = false; // AI is mid-run; no decision window is open
+
+	// Simulate pi: the run's assistant message (tool call, no text) is saved before the tool batch runs.
+	rt.pushMessage({
+		role: "assistant",
+		content: [{ type: "toolCall", id: "t1", name: "watchdog_decide", arguments: { decision: "done" } }],
+	});
+
+	const tool = rt.tools.get("watchdog_decide");
+	await expect(tool.execute("t1", { decision: "done" }, undefined, undefined, rt.ctx)).rejects.toThrow(/delivered/);
+	// Not stopped yet: the watchdog is still running and the turn did not end.
+	expect(rt.state.abortedTurns).toBe(0);
+	await rt.commands.get("watchdog").handler("status", rt.ctx);
+	expect(rt.notifications.some((n) => n.msg.includes("not running"))).toBe(false);
+
+	// The remind is once per run: a second silent stop in the same run goes through instead of looping.
+	const second = await tool.execute("t1", { decision: "done" }, undefined, undefined, rt.ctx);
+	expect(JSON.stringify(second.content)).toContain("OK.");
+});
+
+it("a proactive stop whose message does carry text goes straight through", async () => {
+	const rt = await setup();
+	await rt.commands.get("watchdog").handler("timeout=60", rt.ctx);
+	rt.state.idle = false;
+
+	rt.pushMessage({
+		role: "assistant",
+		content: [
+			{ type: "text", text: "All checks pass; summary delivered." },
+			{ type: "toolCall", id: "t1", name: "watchdog_decide", arguments: { decision: "done" } },
+		],
+	});
+
+	const result = await rt.tools
+		.get("watchdog_decide")
+		.execute("t1", { decision: "done" }, undefined, undefined, rt.ctx);
+	expect(JSON.stringify(result.content)).toContain("OK.");
+	expect(result.terminate).toBe(true);
+});
+
 it("calling watchdog_decide while not running says there is nothing to stop", async () => {
 	const rt = await setup();
 	// lazy: start then fully stop, so the tool stays registered while monitoring is off

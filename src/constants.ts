@@ -154,4 +154,14 @@ export const EMPTY_REPLY_NOTE = "the model never called watchdog_decide — no w
  */
 export const BAD_DECISION_NOTE = `${TOOL_NAME} needs a decision of ${DECISION_CHOICES}.`;
 
+/**
+ * Thrown when a proactive stop carries no text at all: the model read its conclusion into a tool result
+ * and called watchdog_decide, so the user only ever saw the card note. The narrow check (this turn's own
+ * assistant message) can be wrong about earlier turns, so it fires once per run and then fails open —
+ * one wasted round trip beats an infinite remind-loop burning tokens.
+ */
+export const UNDELIVERED_STOP_NOTE =
+	`watchdog: the message calling this tool carries no text, so your answer was never delivered — the user only sees the card note. ` +
+	`Send the conclusion as a normal text message first, then call ${TOOL_NAME} again.`;
+
 export const STATUS_KEY = "watchdog";
