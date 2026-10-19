@@ -493,8 +493,13 @@ function publishState() {
  * once-mode AI stop landed. Only full stops fire this, never a keep-mode nap — consumers should treat it
  * as "the watchdog gave up or was asked to leave", e.g. a driver loop that must not wait on us forever.
  */
-function publishStopped(reason: "max-reached" | "manual" | "ai-stop") {
-	pi.events.emit(WATCHDOG_STOPPED_EVENT, { reason, nudgeCount: state.nudgeCount, maxNudges: state.maxNudges });
+function publishStopped(reason: "max-reached" | "manual" | "ai-stop", suspended = false) {
+	pi.events.emit(WATCHDOG_STOPPED_EVENT, {
+		reason,
+		suspended,
+		nudgeCount: state.nudgeCount,
+		maxNudges: state.maxNudges,
+	});
 }
 
 function clearCountdown() {
@@ -1223,7 +1228,9 @@ function stopWatchdog(
 	}
 	// Soft stop: in keep mode this only pauses us until the user talks again.
 	teardown(ctx, false);
-	if (!state.suspended) publishStopped("ai-stop");
+	// Always announce "the AI declared done" — keep mode's nap is only a monitoring detail, and a
+	// consumer (e.g. a verification gate) must see the done signal even when the watchdog sleeps on.
+	publishStopped("ai-stop", state.suspended);
 	if (decisionWindow === null) {
 		// No check turn: hold the record until the run settles. The marker has to be the last row of the turn
 		// it closes, and the card describes a stop that is over.

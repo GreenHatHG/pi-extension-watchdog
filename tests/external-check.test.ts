@@ -111,16 +111,29 @@ it("watchdog:stopped fires when the nudge cap is hit", async () => {
 	expect(nudgeMessages(rt)).toHaveLength(2);
 });
 
-it("watchdog:stopped fires on /watchdog stop but never on a keep-mode nap", async () => {
+it("watchdog:stopped fires on /watchdog stop; an AI stop in keep mode fires too, with suspended=true", async () => {
 	const rt = await setup();
 	const stops: any[] = [];
 	rt.pi.events.on("watchdog:stopped", (s: unknown) => stops.push(s));
 	await rt.commands.get("watchdog").handler("timeout=10 mode=keep", rt.ctx);
-	// AI calls watchdog_decide("done") outside a check: keep mode suspends (a nap).
+	// AI calls watchdog_decide("done") outside a check: keep mode suspends (a nap), but the done
+	// signal still fires — "the AI declared done" and "monitoring sleeps" are separate facts, and
+	// consumers (e.g. a verification gate) need the first even when the watchdog naps.
 	await rt.tools.get("watchdog_decide").execute("p1", { decision: "done" }, undefined, undefined, rt.ctx);
-	expect(stops).toHaveLength(0);
+	expect(stops).toHaveLength(1);
+	expect(stops[0]).toMatchObject({ reason: "ai-stop", suspended: true });
 
 	await rt.commands.get("watchdog").handler("stop", rt.ctx);
+	expect(stops).toHaveLength(2);
+	expect(stops[1]).toMatchObject({ reason: "manual", suspended: false });
+});
+
+it("an AI stop in once mode fires watchdog:stopped with suspended=false", async () => {
+	const rt = await setup();
+	const stops: any[] = [];
+	rt.pi.events.on("watchdog:stopped", (s: unknown) => stops.push(s));
+	await rt.commands.get("watchdog").handler("timeout=10", rt.ctx);
+	await rt.tools.get("watchdog_decide").execute("p1", { decision: "done" }, undefined, undefined, rt.ctx);
 	expect(stops).toHaveLength(1);
-	expect(stops[0].reason).toBe("manual");
+	expect(stops[0]).toMatchObject({ reason: "ai-stop", suspended: false });
 });

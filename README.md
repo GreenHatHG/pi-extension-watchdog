@@ -105,6 +105,7 @@ AI 停止输出、进入空闲后开始倒计时；倒计时期间 AI 再次运�
 
 - `watchdog:state`：状态变化时广播；消费方以载荷中的 `running` 判断 watchdog 是否仍会续跑。
 - `watchdog:state:query`：消费方在启动或 reload 后查询；watchdog 会立即重新广播当前状态，避免依赖扩展加载顺序。
+- `watchdog:stopped`：watchdog 彻底停止时广播（`reason`: `ai-stop` = AI 自己调 `watchdog_decide` 收尾、`manual` = `/watchdog stop`、`max-reached` = 催促额度用完），载荷带 `suspended` 标志。**AI 收尾恒发**：常驻模式打盹也发（`suspended: true`）——「AI 宣告完成」和「监控是否继续」是两件事，消费方（如 verification 门）要的是前者；`/watchdog stop` 与额度用完则恒带 `suspended: false`。
 
 常驻模式下调用 `watchdog_decide` 会发布 `running: false, suspended: true`，表示当前任务已经结束、正在等待下一条真人消息；真人消息恢复监控后重新发布 `running: true`。
 
