@@ -29,7 +29,6 @@ import {
 	DECISION_NOTE_MAX_CHARS,
 	DECISION_WAIT_USER,
 	DECISIONS,
-	DEFAULT_MAX_NUDGES,
 	DEFAULT_TIMEOUT_SECONDS,
 	type Decision,
 	EMPTY_REPLY_NOTE,
@@ -51,7 +50,30 @@ import {
 import { type DecisionCardData, registerDecisionCardRenderers } from "./decision-card.ts";
 import { expandedCardIds, expandedHintIds } from "./expanded.ts";
 import { registerWatchdogContextFolding } from "./fold.ts";
-import { MODE_POLICY, modeFromKeepAlive, type WatchdogMode } from "./mode.ts";
+import { MODE_POLICY, modeFromKeepAlive } from "./mode.ts";
+import {
+	activeCtx,
+	clearCountdown,
+	createExchangeId,
+	decisionWindow,
+	getPi,
+	lastMistake,
+	type PendingProactiveStop,
+	pendingProactiveStop,
+	setActiveCtx,
+	setDecisionWindow,
+	setLastMistake,
+	setPendingProactiveStop,
+	setPi,
+	setSilentStopWarned,
+	setToolRegistered,
+	setUnsubTerminalInput,
+	silentStopWarned,
+	state,
+	stopWithoutCtx,
+	toolRegistered,
+	unsubTerminalInput,
+} from "./state.ts";
 import { isRecord, isRestoredReason } from "./utils.ts";
 
 /** One decision exchange: from the nudge we send until that turn settles. */
@@ -76,108 +98,24 @@ interface DecisionWindow {
 	mistake?: string;
 }
 
-interface WatchdogState {
-	running: boolean;
-	/** Mode: once shuts the watchdog down on an AI stop; keep only pauses, and the next user message wakes us. */
-	mode: WatchdogMode;
-	/** Paused in keep mode; a new user message resumes us. */
-	suspended: boolean;
-	timeoutMs: number;
-	message: string;
-	maxNudges: number;
-	nudgeCount: number;
-	/** When the countdown ends (epoch ms); null while the AI runs. */
-	countdownDeadline: number | null;
-	/** Editor has unsent text, so the countdown is paused; clears when the text is gone. */
-	pausedByInput: boolean;
-	/** User is pressing keys, so the countdown is paused; clears when they stop. */
-	pausedByActivity: boolean;
-	/** When the user last pressed a key; tells us if they are still busy. */
-	lastInputAt: number;
-	/** User hit ESC on the last run: skip this idle spell, clear on their next real message. */
-	interrupted: boolean;
-	/**
-	 * The countdown ran out while the session was busy: another run (agent_settled re-arms us), or pi
-	 * compacting, which never fires agent_settled at all. The ticker re-arms the countdown once idle.
-	 */
-	waitingForIdle: boolean;
-	timer: ReturnType<typeof setTimeout> | null;
-	ticker: ReturnType<typeof setInterval> | null;
-}
-
-// pi loads this extension once, so one module-level state is enough.
-let pi: ExtensionAPI;
-const state: WatchdogState = {
-	running: false,
-	mode: "once",
-	suspended: false,
-	timeoutMs: DEFAULT_TIMEOUT_SECONDS * 1000,
-	message: "", // Extra instruction only; continuationText glues on the fixed trigger line.
-	maxNudges: DEFAULT_MAX_NUDGES,
-	nudgeCount: 0,
-	countdownDeadline: null,
-	pausedByInput: false,
-	pausedByActivity: false,
-	lastInputAt: 0,
-	interrupted: false,
-	waitingForIdle: false,
-	timer: null,
-	ticker: null,
-};
-
-/** Last ctx we saw; the ticker needs it to repaint the status bar. */
-let activeCtx: ExtensionContext | null = null;
-/** The decision turn we are inside, if any. */
-let decisionWindow: DecisionWindow | null = null;
-/** Cancel handle for the raw-key listener; only interactive mode gives us one. */
-let unsubTerminalInput: (() => void) | null = null;
-/** Register watchdog_decide once and never remove it, to keep the prompt cache prefix stable. */
-let toolRegistered = false;
-let exchangeCounter = 0;
-/** The mistake the last check caught (wrong tool, text-only answer); shown once in the next check's prompt. */
-let lastMistake: string | undefined;
-
-/**
- * The proactive stop waiting to be written down: the tool ran, but the run it belongs to is not over yet.
- * Held until then because a `pi.sendMessage` from inside a running tool only lands at turn_end, which is
- * after the AI's wrap-up text — a marker sent from the tool would end the fold range on the wrong side.
- */
-interface PendingProactiveStop {
-	/** Fresh each time, so the marker links back to this stop and to nothing else. */
-	exchangeId: string;
-	/** The watchdog_decide call the range hangs off; the assistant message carrying it starts the range. */
-	toolCallId: string;
-	/** Keep mode: monitoring is only suspended, and the card says so. */
-	suspended: boolean;
-	/** Why the AI stopped: "done" or "wait_user". */
-	decision: StopDecision;
-	/** The short note the AI passed along, so the card can show it. Undefined when it wrote none. */
-	reply?: string;
-	nudgeCount: number;
-}
-let pendingProactiveStop: PendingProactiveStop | null = null;
-
-/** Set after we threw once at a silent proactive stop in this run; the next one fails open. */
-let silentStopWarned = false;
-
 /** Back-to-back empty replies from the model; the card shows the streak, and a warning fires at the threshold. */
 let emptyStreak = 0;
 /** After this many silent checks in a row, tell the user the model looks broken. */
 const EMPTY_STREAK_WARN = 3;
 
 export default function (extensionApi: ExtensionAPI) {
-	pi = extensionApi;
+	setPi(extensionApi);
 	// pi re-runs this factory for every new session but keeps the module cached, so clear the flag here.
 	// Left alone it would carry the previous session's registration into this one, whose tool table is empty,
 	// and startWatchdog would skip registerDecideTool, leaving the AI without watchdog_decide.
-	toolRegistered = false;
+	setToolRegistered(false);
 	emptyStreak = 0;
-	silentStopWarned = false;
+	setSilentStopWarned(false);
 	// Same reason: a stop whose run never settled must not follow us into the new session.
-	pendingProactiveStop = null;
+	setPendingProactiveStop(null);
 
 	// Must run now, not at start: resuming a session replays saved nudge messages, and a missing renderer would show their raw text.
-	registerDecisionCardRenderers(pi);
+	registerDecisionCardRenderers(getPi());
 	// Both types of a check keep one open state per exchange by entry id, so they reset on a new run.
 	expandedHintIds.clear();
 	expandedCardIds.clear();
@@ -185,23 +123,23 @@ export default function (extensionApi: ExtensionAPI) {
 	// ---- Every hook we listen to, in lifecycle order. ----
 
 	// Before each model call: fold old decision exchanges out of the request view only.
-	registerWatchdogContextFolding(pi);
+	registerWatchdogContextFolding(getPi());
 	// Session opens: start from PI_WATCHDOG when it is set.
-	pi.on("session_start", onSessionStart);
+	getPi().on("session_start", onSessionStart);
 	// User sends a real message: wake a paused run and clear the ESC stop.
-	pi.on("input", onInput);
-	pi.on("agent_start", onAgentStart);
+	getPi().on("input", onInput);
+	getPi().on("agent_start", onAgentStart);
 	// During a decision turn: block every tool except watchdog_decide.
-	pi.on("tool_call", onToolCall);
+	getPi().on("tool_call", onToolCall);
 	// A user message saved mid-check: the check is void, the user is in charge now.
-	pi.on("message_end", onMessageEnd);
+	getPi().on("message_end", onMessageEnd);
 	// A run ends: remember if the user pressed ESC.
-	pi.on("agent_end", onAgentEnd);
+	getPi().on("agent_end", onAgentEnd);
 	// Run fully settled: write a proactive stop's card and fold marker, close the decision turn, re-arm.
-	pi.on("agent_settled", onAgentSettled);
-	pi.on("agent_settled", onProactiveStopSettled);
-	pi.on("session_shutdown", onSessionShutdown);
-	pi.events.on("watchdog:state:query", publishState);
+	getPi().on("agent_settled", onAgentSettled);
+	getPi().on("agent_settled", onProactiveStopSettled);
+	getPi().on("session_shutdown", onSessionShutdown);
+	getPi().events.on("watchdog:state:query", publishState);
 
 	registerWatchdogCommand();
 }
@@ -247,10 +185,10 @@ function onSessionStart(event: SessionStartEvent, ctx: ExtensionContext) {
 /** A run started: stop counting and forget any pause. */
 function onAgentStart(_event: AgentStartEvent, ctx: ExtensionContext) {
 	if (!state.running) return;
-	activeCtx = ctx;
+	setActiveCtx(ctx);
 	state.pausedByInput = false;
 	state.pausedByActivity = false;
-	silentStopWarned = false; // A new run gets its own one warn.
+	setSilentStopWarned(false); // A new run gets its own one warn.
 	// Don't clear `interrupted` here: a run can be started by another extension, so only a real user message clears it.
 	clearCountdown();
 	renderStatus(ctx);
@@ -342,7 +280,7 @@ function onMessageEnd(event: MessageEndEvent) {
  */
 async function onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext) {
 	const window = decisionWindow;
-	decisionWindow = null;
+	setDecisionWindow(null);
 	if (window !== null) {
 		// A decision turn is void (superseded) when the user jumped in, the turn isn't idle, or ESC hit.
 		// We must still drop a terminal marker, or the "keep until a marker" rule makes the decision prompt stick forever.
@@ -362,13 +300,13 @@ async function onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext) 
 		// A mistake (wrong tool, text-only answer) rides into the next check's prompt, so the model sees what
 		// it did wrong; kept only for an empty check, or the note would outlive the exchange it explains —
 		// an answered check folds whole, so its evidence is gone and the note would dangle without a referent.
-		if (outcome === "empty" && window.mistake !== undefined) lastMistake = window.mistake;
+		if (outcome === "empty" && window.mistake !== undefined) setLastMistake(window.mistake);
 		// A check that never answered (provider error, or an empty reply) is retried by the next
 		// countdown, not on the spot: the timer re-arms and that check spends the next nudge from the
 		// same max= budget (sendDecision caps and auto-stops).
 		const rearm = state.running && (outcome === "failed" || outcome === "empty");
 		if (outcome === "stop" || outcome === "superseded" || rearm) {
-			pi.sendMessage(
+			getPi().sendMessage(
 				{
 					customType: FOLD_MESSAGE_TYPE,
 					content: "",
@@ -386,7 +324,7 @@ async function onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext) 
 		} else {
 			// "continue" means work remains: send the continue message to start the real work turn.
 			// It is both the fold's end marker and the only kept message from the whole exchange.
-			pi.sendMessage(
+			getPi().sendMessage(
 				{
 					customType: CONTINUATION_MESSAGE_TYPE,
 					content: continuationText(state.message || undefined),
@@ -416,7 +354,7 @@ async function onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext) 
 		} else if (outcome !== "failed") {
 			emptyStreak = 0;
 		}
-		pi.appendEntry<DecisionCardData>(DECISION_ENTRY_TYPE, {
+		getPi().appendEntry<DecisionCardData>(DECISION_ENTRY_TYPE, {
 			exchangeId: window.exchangeId,
 			outcome,
 			reply,
@@ -430,7 +368,7 @@ async function onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext) 
 		});
 	}
 	if (!state.running) return;
-	activeCtx = ctx;
+	setActiveCtx(ctx);
 	armCountdown(ctx); // Queued turns and failed/empty checks are done, so count down again.
 }
 
@@ -442,7 +380,7 @@ async function onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext) 
  */
 function onProactiveStopSettled(_event: AgentSettledEvent) {
 	const stop = pendingProactiveStop;
-	pendingProactiveStop = null;
+	setPendingProactiveStop(null);
 	if (stop === null) return;
 	recordProactiveStop(stop);
 	markProactiveStop(stop);
@@ -462,20 +400,20 @@ function onInput(event: InputEvent, ctx: ExtensionContext) {
 
 /** Session closing: clean up. A reload just rebinds extensions, so don't broadcast a fake stop. */
 function onSessionShutdown(event: SessionShutdownEvent, ctx: ExtensionContext) {
-	decisionWindow = null;
-	pendingProactiveStop = null;
+	setDecisionWindow(null);
+	setPendingProactiveStop(null);
 	// Session is going away, so stop hard; on reload keep quiet, others just get rebound.
 	teardown(ctx, true, event.reason !== "reload");
 	// Session replacement (/clear, /resume, /fork) makes this ctx stale before the next session_start.
 	// Drop it so no later fallback (e.g. teardown without a ctx) can touch the dead context.
-	activeCtx = null;
+	setActiveCtx(null);
 }
 
 // ---------- state helpers ----------
 
 /** Tell other extensions our state; agent_settled can't say we'll nudge again, so consumers should trust `running`. */
 function publishState() {
-	pi.events.emit("watchdog:state", {
+	getPi().events.emit("watchdog:state", {
 		running: state.running,
 		suspended: state.suspended,
 		keepAlive: state.mode === "keep",
@@ -494,22 +432,12 @@ function publishState() {
  * as "the watchdog gave up or was asked to leave", e.g. a driver loop that must not wait on us forever.
  */
 function publishStopped(reason: "max-reached" | "manual" | "ai-stop", suspended = false) {
-	pi.events.emit(WATCHDOG_STOPPED_EVENT, {
+	getPi().events.emit(WATCHDOG_STOPPED_EVENT, {
 		reason,
 		suspended,
 		nudgeCount: state.nudgeCount,
 		maxNudges: state.maxNudges,
 	});
-}
-
-function clearCountdown() {
-	if (state.timer) {
-		clearTimeout(state.timer);
-		state.timer = null;
-	}
-	state.countdownDeadline = null;
-	// Any fresh arming replaces the wait; the flag only ever means "the timer already ran out once".
-	state.waitingForIdle = false;
 }
 
 /** Unsent text in the editor means the user is typing by hand. */
@@ -630,7 +558,7 @@ function teardown(ctx?: ExtensionContext, force = true, publish = true) {
 		(ctx ?? activeCtx)?.ui.setStatus(STATUS_KEY, undefined);
 		if (unsubTerminalInput) {
 			unsubTerminalInput();
-			unsubTerminalInput = null;
+			setUnsubTerminalInput(null);
 		}
 	} else {
 		// Napping: keep the status line, so the user still sees ⏱⏸.
@@ -640,27 +568,6 @@ function teardown(ctx?: ExtensionContext, force = true, publish = true) {
 	if (publish) publishState();
 }
 
-/**
- * Stop for real without touching the ctx. On a stale ctx every ui call throws too, so a shutdown that
- * cleans the status line cannot be used here; clearing the state is all we can honestly do.
- */
-function stopWithoutCtx() {
-	state.running = false;
-	state.suspended = false;
-	state.pausedByInput = false;
-	state.pausedByActivity = false;
-	state.interrupted = false;
-	clearCountdown();
-	if (state.ticker) {
-		clearInterval(state.ticker);
-		state.ticker = null;
-	}
-	if (unsubTerminalInput) {
-		unsubTerminalInput();
-		unsubTerminalInput = null;
-	}
-}
-
 /** Wake a paused keep-mode watchdog: keep the old settings, reset the nudge count. */
 function resumeWatchdog(ctx: ExtensionContext) {
 	if (!state.suspended || state.running) return;
@@ -668,7 +575,7 @@ function resumeWatchdog(ctx: ExtensionContext) {
 	state.running = true;
 	state.nudgeCount = 0;
 	state.interrupted = false;
-	activeCtx = ctx;
+	setActiveCtx(ctx);
 	startTicker();
 	ensureTerminalInputListener(ctx);
 	if (ctx.isIdle()) {
@@ -696,14 +603,16 @@ function ensureTerminalInputListener(ctx: ExtensionContext) {
 	if (unsubTerminalInput) return;
 	const ui = ctx.ui as any;
 	if (typeof ui.onTerminalInput !== "function") return;
-	unsubTerminalInput = ui.onTerminalInput(() => {
-		state.lastInputAt = Date.now();
-		if (!state.running || state.countdownDeadline == null) return;
-		// A key just landed, so pause now instead of waiting for the ticker.
-		clearCountdown();
-		state.pausedByActivity = true;
-		renderStatus(activeCtx ?? ctx);
-	});
+	setUnsubTerminalInput(
+		ui.onTerminalInput(() => {
+			state.lastInputAt = Date.now();
+			if (!state.running || state.countdownDeadline == null) return;
+			// A key just landed, so pause now instead of waiting for the ticker.
+			clearCountdown();
+			state.pausedByActivity = true;
+			renderStatus(activeCtx ?? ctx);
+		}),
+	);
 }
 
 /** AI went idle: start the countdown, or pause first if the user is typing or pressing keys. */
@@ -793,15 +702,15 @@ function sendDecision(ctx: ExtensionContext): boolean {
 	}
 	try {
 		const exchangeId = createExchangeId();
-		decisionWindow = { exchangeId };
+		setDecisionWindow({ exchangeId });
 		// The previous check's mistake rides along in the prompt: the model cannot learn from a failure it
 		// never sees, and a fresh check with no mention of it is how the same mistake repeated twice.
 		const content = lastMistake
 			? `${DECISION_MESSAGE}\n\nYour last check went unanswered because of your own mistake: ${lastMistake}. This is a new check — answer it now.`
 			: DECISION_MESSAGE;
-		lastMistake = undefined; // one mention per check; a new mistake replaces it
+		setLastMistake(undefined); // one mention per check; a new mistake replaces it
 		// display:true shows the collapsed check hint; details.exchangeId lets the context hook and the hint renderer find this exchange.
-		pi.sendMessage(
+		getPi().sendMessage(
 			{
 				customType: DECISION_MESSAGE_TYPE,
 				content,
@@ -814,7 +723,7 @@ function sendDecision(ctx: ExtensionContext): boolean {
 		// Only a stale ctx throws here: pi swallows async send failures itself, a replaced session makes
 		// every pi and ctx call throw. Staying alive would leave a half-open decision window that blocks
 		// every tool in the next turn, so stop for real, touching neither the UI nor the event bus.
-		decisionWindow = null;
+		setDecisionWindow(null);
 		state.nudgeCount--; // the message never went out, so it does not spend a nudge
 		stopWithoutCtx();
 		return false;
@@ -832,7 +741,7 @@ function askExternalCheck(): ExternalCheckAnswer | undefined {
 	// The answer travels in the payload: EventEmitter drops handler return values, so a writable
 	// `answer` slot on the event is the only channel a synchronous listener can reply through.
 	const event: ExternalCheckEvent = { nudgeCount: state.nudgeCount, maxNudges: state.maxNudges };
-	pi.events.emit(WATCHDOG_CHECK_EVENT, event);
+	getPi().events.emit(WATCHDOG_CHECK_EVENT, event);
 	const answer = event.answer;
 	if (!isRecord(answer)) return undefined;
 	const decision = (answer as { decision?: unknown }).decision;
@@ -849,7 +758,7 @@ function askExternalCheck(): ExternalCheckAnswer | undefined {
 function sendExternalContinuation(ctx: ExtensionContext, message: string | undefined) {
 	try {
 		const content = message?.trim() || continuationText(state.message || undefined);
-		pi.sendMessage(
+		getPi().sendMessage(
 			{
 				customType: CONTINUATION_MESSAGE_TYPE,
 				content,
@@ -879,7 +788,7 @@ function startWatchdog(
 	// Register the tool on first start only: sessions without monitoring don't send it, saving tokens.
 	// Once registered we never remove it, so the tools list stays stable for the prompt cache.
 	if (!toolRegistered) {
-		toolRegistered = true;
+		setToolRegistered(true);
 		registerDecideTool();
 	}
 	// Allow a restart while running: reset settings and counters.
@@ -893,8 +802,8 @@ function startWatchdog(
 	state.message = message;
 	if (maxNudges !== undefined) state.maxNudges = maxNudges;
 	state.nudgeCount = 0;
-	lastMistake = undefined; // a fresh run starts clean; a stale note would misname its first check
-	activeCtx = ctx;
+	setLastMistake(undefined); // a fresh run starts clean; a stale note would misname its first check
+	setActiveCtx(ctx);
 	startTicker();
 	ensureTerminalInputListener(ctx);
 
@@ -918,13 +827,6 @@ function startWatchdog(
 		"info",
 	);
 	publishState();
-}
-
-// ---------- small helpers ----------
-
-function createExchangeId(): string {
-	exchangeCounter += 1;
-	return `w${Date.now().toString(36)}-${exchangeCounter}`;
 }
 
 /**
@@ -1076,7 +978,7 @@ function startTicker() {
  * A history record, so it stays readable in `/tree` and never enters the model context.
  */
 function recordProactiveStop(stop: PendingProactiveStop) {
-	pi.appendEntry<DecisionCardData>(DECISION_ENTRY_TYPE, {
+	getPi().appendEntry<DecisionCardData>(DECISION_ENTRY_TYPE, {
 		// The card and the fold marker share one id, so a card can be read next to the range it explains.
 		exchangeId: stop.exchangeId,
 		outcome: "stop",
@@ -1093,13 +995,13 @@ function recordProactiveStop(stop: PendingProactiveStop) {
 /**
  * Write the marker that closes a proactive stop's fold range.
  *
- * Sent after the run rather than from the tool: a `pi.sendMessage` from a running tool defers to
+ * Sent after the run rather than from the tool: a `getPi().sendMessage` from a running tool defers to
  * turn_end, which is too late — the wrap-up text the AI wrote after the tool call sits queued in front
  * of it, and would end up on the wrong side of the range. Written here, the marker lands last, naming
  * the tool call so folding can find the range without depending on the order it was saved in.
  */
 function markProactiveStop(stop: PendingProactiveStop) {
-	pi.sendMessage(
+	getPi().sendMessage(
 		{
 			customType: STOP_MESSAGE_TYPE,
 			content: "",
@@ -1116,7 +1018,7 @@ function markProactiveStop(stop: PendingProactiveStop) {
  * Registered once by startWatchdog; pi lets us register after startup.
  */
 function registerDecideTool() {
-	pi.registerTool({
+	getPi().registerTool({
 		name: TOOL_NAME,
 		label: "Watchdog decide",
 		description: TOOL_DESCRIPTION,
@@ -1196,7 +1098,7 @@ function registerDecideTool() {
 			}
 			// A silent proactive stop reads as "conclusion left in a tool result"; nudge once, then fail open.
 			if (!silentStopWarned && !turnCarriesText(toolCallId, ctx)) {
-				silentStopWarned = true;
+				setSilentStopWarned(true);
 				throw new Error(UNDELIVERED_STOP_NOTE);
 			}
 			return stopWatchdog(toolCallId, decision, note, ctx);
@@ -1234,14 +1136,14 @@ function stopWatchdog(
 	if (decisionWindow === null) {
 		// No check turn: hold the record until the run settles. The marker has to be the last row of the turn
 		// it closes, and the card describes a stop that is over.
-		pendingProactiveStop = {
+		setPendingProactiveStop({
 			exchangeId: createExchangeId(),
 			toolCallId,
 			decision,
 			reply: note,
 			suspended: state.suspended,
 			nudgeCount: state.nudgeCount,
-		};
+		});
 	}
 	return { content: [{ type: "text", text: "OK." }], details: {}, terminate: true };
 }
@@ -1250,11 +1152,11 @@ function stopWatchdog(
 
 /** Register the /watchdog command: start, stop, or show status. */
 function registerWatchdogCommand() {
-	pi.registerCommand("watchdog", {
+	getPi().registerCommand("watchdog", {
 		description:
 			"Auto-continue watch: [timeout=sec] [max=count] [message=text] [mode=once|keep] to start | stop to end | status to check",
 		handler: async (args, ctx) => {
-			activeCtx = ctx;
+			setActiveCtx(ctx);
 			const tokens = args.trim().split(/\s+/).filter(Boolean);
 			const [first] = tokens;
 
