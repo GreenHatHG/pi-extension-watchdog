@@ -3,7 +3,7 @@ import { armCountdown, ensureTerminalInputListener, startTicker, teardown } from
 import { registerDecideTool } from "./decide-tool.ts";
 import { MODE_POLICY, modeFromKeepAlive } from "./mode.ts";
 import { hasMessages } from "./run-scan.ts";
-import { setActiveCtx, setLastMistake, setToolRegistered, state, toolRegistered } from "./state.ts";
+import { setActiveCtx, setLastMistake, setOnStopFired, setToolRegistered, state, toolRegistered } from "./state.ts";
 import { publishState, renderStatus } from "./status.ts";
 
 /** Start watching: register the tool on first use, reset settings, then arm or wait. */
@@ -27,11 +27,12 @@ export function startWatchdog(
 	// Restarting: stop hard, and don't tell others we stopped (the run keeps going).
 	teardown(ctx, true, false);
 	state.mode = modeFromKeepAlive(keepAlive);
-	state.running = true;
+	state.status = "running";
 	state.timeoutMs = timeoutSeconds * 1000;
 	state.message = message;
 	if (maxNudges !== undefined) state.maxNudges = maxNudges;
 	state.nudgeCount = 0;
+	setOnStopFired(false); // A fresh run may fire the stop hook once again.
 	setLastMistake(undefined); // a fresh run starts clean; a stale note would misname its first check
 	setActiveCtx(ctx);
 	startTicker();

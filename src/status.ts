@@ -1,12 +1,12 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { ACTIVITY_GRACE_MS, STATUS_KEY, WATCHDOG_STOPPED_EVENT } from "./constants.ts";
-import { getPi, state } from "./state.ts";
+import { getPi, isRunning, isSuspended, state } from "./state.ts";
 
 /** Tell other extensions our state; agent_settled can't say we'll nudge again, so consumers should trust `running`. */
 export function publishState() {
 	getPi().events.emit("watchdog:state", {
-		running: state.running,
-		suspended: state.suspended,
+		running: isRunning(),
+		suspended: isSuspended(),
 		keepAlive: state.mode === "keep",
 		countdownArmed: state.countdownDeadline != null,
 		paused: state.pausedByInput || state.pausedByActivity,
@@ -66,7 +66,7 @@ export type WatchdogPhase =
  * here only; two copies in two different orders is how they drifted apart before.
  */
 export function currentPhase(): WatchdogPhase {
-	if (state.suspended) return { kind: "suspended" };
+	if (isSuspended()) return { kind: "suspended" };
 	if (state.interrupted) return { kind: "interrupted" };
 	if (state.countdownDeadline != null) {
 		const remainingSeconds = Math.max(0, Math.ceil((state.countdownDeadline - Date.now()) / 1000));
@@ -99,7 +99,7 @@ export function phaseText(phase: WatchdogPhase): string {
 /** Status bar: counting `⏱23s 2/50`, paused `⏱✍ 2/50`, waiting `⏱▶ 2/50`, napping `⏱⏸ 2/50`, stopped `⏱⏹ 2/50`. */
 export function renderStatus(ctx: ExtensionContext) {
 	// A nap has running=false but still owns the status line, so don't bail out on it.
-	if (!state.running && !state.suspended) return;
+	if (!isRunning() && !isSuspended()) return;
 	const count = fg(ctx, "dim", ` ${state.nudgeCount}/${state.maxNudges}`);
 	const phase = currentPhase();
 	let glyph: string;

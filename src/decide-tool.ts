@@ -28,7 +28,11 @@ import {
 	createExchangeId,
 	decisionWindow,
 	getPi,
+	isRunning,
+	isSuspended,
+	onStopFired,
 	type PendingProactiveStop,
+	setOnStopFired,
 	setPendingProactiveStop,
 	setSilentStopWarned,
 	silentStopWarned,
@@ -115,12 +119,12 @@ export function registerDecideTool() {
 			const decision = params?.decision as Decision | undefined;
 			const note = typeof params?.note === "string" ? params.note.slice(0, DECISION_NOTE_MAX_CHARS) : undefined;
 			// Nothing to answer or stop when monitoring is off; a second call in one turn lands here too.
-			if (!state.running) {
+			if (!isRunning()) {
 				return {
 					content: [
 						{
 							type: "text",
-							text: state.suspended
+							text: isSuspended()
 								? "Already suspended. Nothing to do — end your turn normally."
 								: "Watchdog is not running. Nothing to stop — end your turn normally.",
 						},
@@ -191,8 +195,12 @@ function stopWatchdog(
 	ctx: ExtensionContext,
 ): AgentToolResult<unknown> {
 	// PI_WATCHDOG_ON_STOP hook: run an external command when the AI stops the watchdog, e.g. touch an exit file or `tmux wait-for -S done` for a parent (subagent) to wait on.
+	// Once per run: a second stop (or a child process inheriting this env re-running the chain, e.g.
+	// a test suite spawned by a sub-agent) must not re-run it — a stale wait-for or kill-session
+	// from a repeat firing kills the wrong pane.
 	const onStop = process.env.PI_WATCHDOG_ON_STOP?.trim();
-	if (onStop) {
+	if (onStop && !onStopFired) {
+		setOnStopFired(true);
 		// Stamp the flight recorder so a "mystery SIGHUP + exit=98" can be attributed after the fact.
 		const dbg = process.env.PI_SUBAGENT_DEBUG?.trim();
 		if (dbg) {
@@ -206,7 +214,10 @@ function stopWatchdog(
 	teardown(ctx, false);
 	// Always announce "the AI declared done" — keep mode's nap is only a monitoring detail, and a
 	// consumer (e.g. a verification gate) must see the done signal even when the watchdog sleeps on.
-	publishStopped("ai-stop", state.suspended);
+	publishStopped("ai-stop", isSuspended());
+	// Capture the nap now: a user message between here and agent_settled resumes us, and the card
+	// would read fresh state instead of the state the stop actually left.
+	if (decisionWindow !== null) decisionWindow.suspended = isSuspended();
 	if (decisionWindow === null) {
 		// No check turn: hold the record until the run settles. The marker has to be the last row of the turn
 		// it closes, and the card describes a stop that is over.
@@ -215,7 +226,7 @@ function stopWatchdog(
 			toolCallId,
 			decision,
 			reply: note,
-			suspended: state.suspended,
+			suspended: isSuspended(),
 			nudgeCount: state.nudgeCount,
 		});
 	}

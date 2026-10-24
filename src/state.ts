@@ -22,14 +22,24 @@ export interface DecisionWindow {
 	 * says what the model actually did, and so a retried check can show the model its own mistake.
 	 */
 	mistake?: string;
+	/** Was the watchdog napping when this check answered "stop"? Captured at stop time: a user message
+	 * landing between stop and settle resumes us, and the card would lose its "monitoring paused" note. */
+	suspended?: boolean;
 }
 
+/**
+ * The three states the watchdog itself can be in; paused/interrupted/waiting are sub-signs of running.
+ * One field instead of two independent booleans (running + suspended) means the impossible combo
+ * (running and suspended at once) can no longer even be written, and what we hold is exactly what
+ * publishState sends out.
+ */
+export type WatchdogStatus = "running" | "suspended" | "stopped";
+
 export interface WatchdogState {
-	running: boolean;
+	/** The one true state; `isRunning()` / `isSuspended()` below are read-only views of it. */
+	status: WatchdogStatus;
 	/** Mode: once shuts the watchdog down on an AI stop; keep only pauses, and the next user message wakes us. */
 	mode: WatchdogMode;
-	/** Paused in keep mode; a new user message resumes us. */
-	suspended: boolean;
 	timeoutMs: number;
 	message: string;
 	maxNudges: number;
@@ -72,11 +82,19 @@ export interface PendingProactiveStop {
 	nudgeCount: number;
 }
 
+/** True while status is "running"; every old `state.running` read works unchanged. */
+export function isRunning(): boolean {
+	return state.status === "running";
+}
+/** True while status is "suspended" (keep mode nap); read-only view of status. */
+export function isSuspended(): boolean {
+	return state.status === "suspended";
+}
+
 // pi loads this extension once, so one module-level state is enough.
 export const state: WatchdogState = {
-	running: false,
+	status: "stopped",
 	mode: "once",
-	suspended: false,
 	timeoutMs: DEFAULT_TIMEOUT_SECONDS * 1000,
 	message: "", // Extra instruction only; continuationText glues on the fixed trigger line.
 	maxNudges: DEFAULT_MAX_NUDGES,
@@ -121,6 +139,13 @@ export function setLastMistake(mistake: string | undefined) {
 export let silentStopWarned = false;
 export function setSilentStopWarned(warned: boolean) {
 	silentStopWarned = warned;
+}
+
+/** ON_STOP already fired for this watchdog run. One run = one stop = one hook execution; a second
+ * stop (or a re-entrant stop from a child process inheriting the env) must not re-run the chain. */
+export let onStopFired = false;
+export function setOnStopFired(fired: boolean) {
+	onStopFired = fired;
 }
 
 /** Register watchdog_decide once and never remove it, to keep the prompt cache prefix stable. */
@@ -169,8 +194,7 @@ export function clearCountdown() {
  * cleans the status line cannot be used here; clearing the state is all we can honestly do.
  */
 export function stopWithoutCtx() {
-	state.running = false;
-	state.suspended = false;
+	state.status = "stopped";
 	state.pausedByInput = false;
 	state.pausedByActivity = false;
 	state.interrupted = false;

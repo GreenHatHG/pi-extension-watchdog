@@ -8,10 +8,13 @@ import {
 	clearCountdown,
 	createExchangeId,
 	getPi,
+	isRunning,
+	isSuspended,
 	lastMistake,
 	setActiveCtx,
 	setDecisionWindow,
 	setLastMistake,
+	setOnStopFired,
 	setUnsubTerminalInput,
 	state,
 	stopWithoutCtx,
@@ -27,9 +30,8 @@ import { editorHasText, publishState, publishStopped, renderStatus, userActive }
  */
 export function teardown(ctx?: ExtensionContext, force = true, publish = true) {
 	// Keep mode + soft stop = nap, not death; the next real user message wakes us up.
-	const suspend = !force && state.running && MODE_POLICY[state.mode].sleepsOnAiStop;
-	state.running = false;
-	state.suspended = suspend;
+	const suspend = !force && isRunning() && MODE_POLICY[state.mode].sleepsOnAiStop;
+	state.status = suspend ? "suspended" : "stopped";
 	state.pausedByInput = false;
 	state.pausedByActivity = false;
 	state.interrupted = false;
@@ -55,11 +57,11 @@ export function teardown(ctx?: ExtensionContext, force = true, publish = true) {
 
 /** Wake a paused keep-mode watchdog: keep the old settings, reset the nudge count. */
 export function resumeWatchdog(ctx: ExtensionContext) {
-	if (!state.suspended || state.running) return;
-	state.suspended = false;
-	state.running = true;
+	if (!isSuspended()) return;
+	state.status = "running";
 	state.nudgeCount = 0;
 	state.interrupted = false;
+	setOnStopFired(false); // A resumed run is a fresh run: its later stop may fire the hook once again.
 	setActiveCtx(ctx);
 	startTicker();
 	ensureTerminalInputListener(ctx);
@@ -91,7 +93,7 @@ export function ensureTerminalInputListener(ctx: ExtensionContext) {
 	setUnsubTerminalInput(
 		ui.onTerminalInput(() => {
 			state.lastInputAt = Date.now();
-			if (!state.running || state.countdownDeadline == null) return;
+			if (!isRunning() || state.countdownDeadline == null) return;
 			// A key just landed, so pause now instead of waiting for the ticker.
 			clearCountdown();
 			state.pausedByActivity = true;
@@ -102,7 +104,7 @@ export function ensureTerminalInputListener(ctx: ExtensionContext) {
 
 /** AI went idle: start the countdown, or pause first if the user is typing or pressing keys. */
 export function armCountdown(ctx: ExtensionContext) {
-	if (!state.running) return;
+	if (!isRunning()) return;
 	if (state.interrupted) {
 		// ESC stopped the last run: skip this idle spell and wait for the user's next real message.
 		renderStatus(ctx);
@@ -132,7 +134,7 @@ export function armCountdown(ctx: ExtensionContext) {
 /** Countdown hit zero: nudge only if the AI is still idle. */
 async function fireNudge(ctx: ExtensionContext) {
 	state.countdownDeadline = null;
-	if (!state.running) return;
+	if (!isRunning()) return;
 	if (!ctx.isIdle()) {
 		// Busy right now: another run (its agent_settled re-arms us), or pi compacting, which never fires
 		// agent_settled at all. Don't drop the idle spell; the ticker re-arms once the session is idle.
@@ -221,7 +223,7 @@ export function sendDecision(ctx: ExtensionContext): boolean {
 export function startTicker() {
 	if (state.ticker) clearInterval(state.ticker);
 	state.ticker = setInterval(() => {
-		if (!state.running || !activeCtx) return;
+		if (!isRunning() || !activeCtx) return;
 		if (state.waitingForIdle) {
 			// The countdown ran out while the session was busy; start a fresh one the moment it is idle.
 			if (activeCtx.isIdle()) armCountdown(activeCtx);

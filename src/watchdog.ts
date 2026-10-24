@@ -37,6 +37,8 @@ import {
 	clearCountdown,
 	decisionWindow,
 	getPi,
+	isRunning,
+	isSuspended,
 	pendingProactiveStop,
 	setActiveCtx,
 	setDecisionWindow,
@@ -120,7 +122,7 @@ function onSessionStart(event: SessionStartEvent, ctx: ExtensionContext) {
 		return;
 	}
 	const envConfig = parseEnvConfig();
-	if (envConfig?.ok && !state.running) {
+	if (envConfig?.ok && !isRunning()) {
 		// Env start and the manual command share startWatchdog; folding is handled by the context hook either way.
 		startWatchdog(
 			ctx,
@@ -147,7 +149,7 @@ function onSessionStart(event: SessionStartEvent, ctx: ExtensionContext) {
 
 /** A run started: stop counting and forget any pause. */
 function onAgentStart(_event: AgentStartEvent, ctx: ExtensionContext) {
-	if (!state.running) return;
+	if (!isRunning()) return;
 	setActiveCtx(ctx);
 	state.pausedByInput = false;
 	state.pausedByActivity = false;
@@ -191,14 +193,14 @@ function onToolCall(event: ToolCallEvent): ToolCallEventResult | undefined {
  * before the run ends, which the guard below reads.
  */
 function onAgentEnd(event: AgentEndEvent, ctx: ExtensionContext) {
-	if (state.running && decisionWindow !== null) {
+	if (isRunning() && decisionWindow !== null) {
 		// Pi may retry a run internally, so read the newest decision from every agent_end; the
 		// final one before agent_settled decides whether the check really failed.
 		const error = runError(event.messages);
 		decisionWindow.failed = error !== undefined;
 		decisionWindow.failureMessage = error;
 	}
-	if (!state.running || !runWasAborted(event.messages)) return;
+	if (!isRunning() || !runWasAborted(event.messages)) return;
 	state.interrupted = true;
 	if (decisionWindow !== null) {
 		// ESC during a decision turn means the user took over: mark it superseded so agent_settled won't continue.
@@ -267,7 +269,7 @@ async function onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext) 
 		// A check that never answered (provider error, or an empty reply) is retried by the next
 		// countdown, not on the spot: the timer re-arms and that check spends the next nudge from the
 		// same max= budget (sendDecision caps and auto-stops).
-		const rearm = state.running && (outcome === "failed" || outcome === "empty");
+		const rearm = isRunning() && (outcome === "failed" || outcome === "empty");
 		if (outcome === "stop" || outcome === "superseded" || rearm) {
 			getPi().sendMessage(
 				{
@@ -323,14 +325,14 @@ async function onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext) 
 			reply,
 			decision:
 				window.decision === DECISION_CONTINUE ? undefined : (window.decision as "done" | "wait_user" | undefined),
-			suspended: outcome === "stop" && state.suspended,
+			suspended: outcome === "stop" && (window.suspended ?? isSuspended()),
 			...(streak !== undefined ? { emptyStreak: streak } : {}),
 			nudgeCount: state.nudgeCount,
 			maxNudges: state.maxNudges,
 			ts: Date.now(),
 		});
 	}
-	if (!state.running) return;
+	if (!isRunning()) return;
 	setActiveCtx(ctx);
 	armCountdown(ctx); // Queued turns and failed/empty checks are done, so count down again.
 }
@@ -352,11 +354,11 @@ function onProactiveStopSettled(_event: AgentSettledEvent) {
 /** A real user message wakes a paused keep-mode run and clears the ESC stop; extension messages are our own nudges, so skip them. */
 function onInput(event: InputEvent, ctx: ExtensionContext) {
 	if (event.source === "extension") return;
-	if (state.running && state.interrupted) {
+	if (isRunning() && state.interrupted) {
 		state.interrupted = false; // User is back, so nudging can resume.
 		publishState();
 	}
-	if (state.suspended && !state.running && MODE_POLICY[state.mode].resumesOnUserMessage) {
+	if (isSuspended() && !isRunning() && MODE_POLICY[state.mode].resumesOnUserMessage) {
 		resumeWatchdog(ctx);
 	}
 }

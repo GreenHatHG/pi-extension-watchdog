@@ -2,7 +2,7 @@ import { parseConfig } from "./config.ts";
 import { DEFAULT_TIMEOUT_SECONDS } from "./constants.ts";
 import { teardown } from "./countdown.ts";
 import { startWatchdog } from "./start.ts";
-import { getPi, setActiveCtx, state } from "./state.ts";
+import { getPi, isRunning, isSuspended, setActiveCtx, state } from "./state.ts";
 import { currentPhase, phaseText, publishStopped } from "./status.ts";
 
 /** Register the /watchdog command: start, stop, or show status. */
@@ -17,14 +17,14 @@ export function registerWatchdogCommand() {
 
 			switch (first) {
 				case "stop": {
-					if (state.suspended && !state.running) {
+					if (isSuspended() && !isRunning()) {
 						state.mode = "once";
 						teardown(ctx);
 						publishStopped("manual");
 						ctx.ui.notify("watchdog: keep-mode monitoring fully off", "info");
 						break;
 					}
-					if (!state.running) {
+					if (!isRunning()) {
 						ctx.ui.notify("watchdog: not running", "info");
 						break;
 					}
@@ -37,14 +37,14 @@ export function registerWatchdogCommand() {
 				}
 
 				case "status": {
-					if (state.suspended && !state.running) {
+					if (isSuspended() && !isRunning()) {
 						ctx.ui.notify(
 							`watchdog: keep-mode monitoring paused (⏱⏸ next message resumes it, nudged ${state.nudgeCount}/${state.maxNudges})`,
 							"info",
 						);
 						break;
 					}
-					if (!state.running) {
+					if (!isRunning()) {
 						ctx.ui.notify(
 							"watchdog: not running (/watchdog timeout=30 message=continue to start; mode=keep for keep mode)",
 							"info",
