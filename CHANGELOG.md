@@ -4,8 +4,13 @@
 
 ## Unreleased
 
+### 修复
+
+- **决策结果卡片不再整行消失（「finished — stopped on purpose」不见了）**：pi 用 jiti 以 `moduleCache: false` 加载扩展源码，同进程内同一份 `src/*.ts` 可能被实例化成多个模块图（扩展重载会 bump 缓存代数并重建整个图）。而 `src/state.ts` 里的共享可变状态全是模块级单例——`decisionWindow`、`pendingProactiveStop`、`pi` 句柄、`toolRegistered`、各计数器、卡片展开集合——每个模块图各有一份。于是 `watchdog_decide` 工具闭包在图 A 里写下的 `decisionWindow`，`onAgentSettled` 在图 B 里读到的是 `null`，整个落盘块（决策卡片 `appendEntry`、折叠标记、继续消息）被整体跳过：检查照常发送、答案照常返回，但时间线上只有「Sending decision message」，结果卡片、折叠与继续消息全部消失（10-23 重构后的会话文件里 `pi-watchdog:decision` 记录为 0 条，重构前的会话有 12 条）。现在所有共享可变状态搬到一个进程全局载体（`globalThis.__piWatchdogState`，`src/state.ts`）：`state` 改为转发读写的 Proxy（现有 `state.x` 代码不动），逐字段访问器（`getDecisionWindow`/`getDecisionWindow` 配套的 setter、`getActiveCtx`、`getPendingProactiveStop`、`getEmptyStreak` 等）取代导出的 `let`；`src/expanded.ts` 的展开集合同样经载体解析。`resetGlobalsForNewSession()` 只在扩展工厂里调用（pi 的「新会话」边界），复现模块图全新初始化的语义。验证：tsc 干净、151/151 测试通过、双 jiti 图 18 项跨图断言全过（工具图写入的 `decisionWindow` 对 settle 图可见、跨图定时器清理、重置语义）。
+
 ### 改变
 
+- **内部状态机从双布尔改为三态 `status`**：`running` + `suspended` 两个独立布尔能组合出非法态（同时为真）与矛盾语义（挂起时「不在跑」），全靠约定维持一致；现在只存 `status: "running" | "suspended" | "stopped"`，`isRunning()` / `isSuspended()` 是它的只读视图——对外 `watchdog:state` 事件、`watchdog:stopped` 载荷、状态栏、命令输出逐字节不变。顺带修了一个竞态：检查回合里答 `stop` 时把挂起标志捕获进 `decisionWindow`，用户恰好在 stop 与 settle 之间发消息时，历史卡片不再丢「monitoring paused」标注（对齐主动收尾路径早就有的捕获）。
 - **连续空回复在卡片上显示连击数，并在第 3 次时提醒用户**：模型一声不吭（没有 `watchdog_decide`、没有文字）的检查以前每张卡片都长一样，模型真的坏了时用户只能看它把 `max=` 预算静默烧完。现在：真静默的空回复按会话累计连击，从第 2 次起卡片尾追加 `· N in a row`，一眼分辨偶发毛刺和死循环；连击满 3 弹一条 warning（「model looks broken; /watchdog stop」），只弹一次。只有真静默才计数——模型犯别的错（调错工具/只回文字，下一次检查的 prompt 会点名错误）和 provider 报错都不算，有真实回答或开始新会话就清零。prompt 路径不变，重复的检查提示仍逐字节一致。
 - **`/reload` 后不再自动重启监控**：reload 的 `session_start` 原来和普通启动走同一条路——只要设了 `PI_WATCHDOG`，就会立刻开始倒计时，而 reload 之间没有任何真实工作，倒计时只会空转。现在 `reason: "reload"` 直接跳过自动启动（发一条 info 提示），需要的话手动 `/watchdog` 重启；resume/fork 的「等首次 `agent_settled` 再计时」语义不变。
 - **催促消息标明来源，system prompt 声明监督环境**：催促前缀从 `[Automated, not user input]` 改成 `[Automated watchdog check — not user input]`——原前缀完全没提 watchdog，模型没有任何线索把这条 custom_message 和监督机制关联起来，于是把它当用户输入、认认真真写长回复，写得越用心被折叠删得越多（实测：一次会话里连多次把催促当输入）。同时 `TOOL_PROMPT_GUIDELINES` 新增一条：声明模型运行在 watchdog 监督下、空闲时会收到 `[Automated watchdog check` 开头的自动消息，那种消息不是用户输入、唯一答案是一次 `watchdog_decide` 调用。决策提示另补一句「忽略这次检查不会让它停下，watchdog 会一直发直到你回答」——回应模型试图等检查过去的翻车。

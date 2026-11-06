@@ -3,7 +3,7 @@ import { armCountdown, ensureTerminalInputListener, startTicker, teardown } from
 import { registerDecideTool } from "./decide-tool.ts";
 import { MODE_POLICY, modeFromKeepAlive } from "./mode.ts";
 import { hasMessages } from "./run-scan.ts";
-import { setActiveCtx, setLastMistake, setOnStopFired, setToolRegistered, state, toolRegistered } from "./state.ts";
+import { isToolRegistered, setActiveCtx, setLastMistake, setOnStopFired, setToolRegistered, state } from "./state.ts";
 import { publishState, renderStatus } from "./status.ts";
 
 /** Start watching: register the tool on first use, reset settings, then arm or wait. */
@@ -17,7 +17,7 @@ export function startWatchdog(
 ) {
 	// Register the tool on first start only: sessions without monitoring don't send it, saving tokens.
 	// Once registered we never remove it, so the tools list stays stable for the prompt cache.
-	if (!toolRegistered) {
+	if (!isToolRegistered()) {
 		setToolRegistered(true);
 		registerDecideTool();
 	}

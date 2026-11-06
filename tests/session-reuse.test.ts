@@ -34,3 +34,23 @@ it("every session in the same process gets watchdog_decide registered", async ()
 	expect(second.tools.has("watchdog_decide")).toBe(true);
 	expect(watchdog).toBeTypeOf("function"); // the module really was reused, not re-imported
 });
+
+it("a tick on a ctx from a replaced session stops the watchdog instead of killing pi", async () => {
+	const rt = await setup();
+	const states: any[] = [];
+	rt.pi.events.on("watchdog:state", (s: unknown) => states.push(s));
+	await rt.commands.get("watchdog").handler("timeout=60", rt.ctx);
+
+	// Replacement invalidates the old ctx; if our shutdown hook never reached the ticker, it keeps the dead
+	// ctx and an uncaught throw from the next paint takes the whole pi process down.
+	Object.defineProperty(rt.ctx, "ui", {
+		configurable: true,
+		get() {
+			throw new Error("This extension ctx is stale after session replacement or reload.");
+		},
+	});
+
+	expect(() => vi.advanceTimersByTime(3000)).not.toThrow();
+	rt.pi.events.emit("watchdog:state:query");
+	expect(states.at(-1)).toMatchObject({ running: false, countdownArmed: false });
+});

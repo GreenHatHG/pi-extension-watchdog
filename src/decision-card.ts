@@ -1,7 +1,7 @@
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { Box, type Component, Text, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { DECISION_ENTRY_TYPE, DECISION_MESSAGE_TYPE, EMPTY_REPLY_NOTE } from "./constants.ts";
-import { expandedCardIds, expandedHintIds } from "./expanded.ts";
+import { getExpandedCardIds, getExpandedHintIds } from "./expanded.ts";
 
 /**
  * Decision result saved as a session CustomEntry: it gets a TUI renderer and stays readable, but never enters the LLM context.
@@ -117,7 +117,7 @@ abstract class DecisionRow implements Component {
 /** The check itself: the nudge, collapsed to a "sending decision message" line; expanded it shows the prompt the model got. */
 class DecisionHintComponent extends DecisionRow {
 	constructor(rowId: string, prompt: string, theme: Theme, expanded: boolean) {
-		super(rowId, prompt, theme, expandedHintIds, expanded);
+		super(rowId, prompt, theme, getExpandedHintIds(), expanded);
 	}
 
 	protected label(theme: Theme, expanded: boolean): string {
@@ -133,7 +133,7 @@ class DecisionCardComponent extends DecisionRow {
 		theme: Theme,
 		expanded: boolean,
 	) {
-		super(rowId, data.reply ?? "", theme, expandedCardIds, expanded);
+		super(rowId, data.reply ?? "", theme, getExpandedCardIds(), expanded);
 	}
 
 	protected label(theme: Theme, expanded: boolean): string {
@@ -167,7 +167,7 @@ export function registerDecisionCardRenderers(pi: ExtensionAPI): void {
 		const exchangeId = typeof details?.exchangeId === "string" ? details.exchangeId : "";
 		const prompt = typeof message.content === "string" ? message.content : "";
 		// A custom message carries no id, and one nudge per exchange means the exchange id is its row key.
-		return new DecisionHintComponent(exchangeId, prompt, theme, expanded || expandedHintIds.has(exchangeId));
+		return new DecisionHintComponent(exchangeId, prompt, theme, expanded || getExpandedHintIds().has(exchangeId));
 	});
 	pi.registerEntryRenderer(DECISION_ENTRY_TYPE, (entry, { expanded }, theme) => {
 		const data = entry.data as DecisionCardData;
@@ -175,7 +175,7 @@ export function registerDecisionCardRenderers(pi: ExtensionAPI): void {
 			entry.id ?? data.exchangeId,
 			data,
 			theme,
-			expanded || expandedCardIds.has(entry.id ?? data.exchangeId),
+			expanded || getExpandedCardIds().has(entry.id ?? data.exchangeId),
 		);
 	});
 }

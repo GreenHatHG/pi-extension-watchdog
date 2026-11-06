@@ -2,9 +2,16 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { ACTIVITY_GRACE_MS, STATUS_KEY, WATCHDOG_STOPPED_EVENT } from "./constants.ts";
 import { getPi, isRunning, isSuspended, state } from "./state.ts";
 
+/** Emit on the pi bus; a stale handle after a reload throws, and a dead bus has no listeners to warn. */
+function emitSafely(name: string, data: unknown) {
+	try {
+		getPi().events.emit(name, data);
+	} catch {}
+}
+
 /** Tell other extensions our state; agent_settled can't say we'll nudge again, so consumers should trust `running`. */
 export function publishState() {
-	getPi().events.emit("watchdog:state", {
+	emitSafely("watchdog:state", {
 		running: isRunning(),
 		suspended: isSuspended(),
 		keepAlive: state.mode === "keep",
@@ -23,7 +30,7 @@ export function publishState() {
  * as "the watchdog gave up or was asked to leave", e.g. a driver loop that must not wait on us forever.
  */
 export function publishStopped(reason: "max-reached" | "manual" | "ai-stop", suspended = false) {
-	getPi().events.emit(WATCHDOG_STOPPED_EVENT, {
+	emitSafely(WATCHDOG_STOPPED_EVENT, {
 		reason,
 		suspended,
 		nudgeCount: state.nudgeCount,
@@ -44,6 +51,19 @@ export function editorHasText(ctx: ExtensionContext): boolean {
 /** Did the user press a key very recently, like picking a command or scrolling history? */
 export function userActive(): boolean {
 	return Date.now() - state.lastInputAt < ACTIVITY_GRACE_MS;
+}
+
+/**
+ * Is this ctx still usable? After a session replacement or reload pi makes every ctx call throw, and an
+ * uncaught throw inside our timer kills the whole pi process, so timers must ask before they touch one.
+ */
+export function ctxAlive(ctx: ExtensionContext): boolean {
+	try {
+		void ctx.ui;
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 /** Color text with the theme; fall back to plain text when there is no theme (tests). */
@@ -100,27 +120,32 @@ export function phaseText(phase: WatchdogPhase): string {
 export function renderStatus(ctx: ExtensionContext) {
 	// A nap has running=false but still owns the status line, so don't bail out on it.
 	if (!isRunning() && !isSuspended()) return;
-	const count = fg(ctx, "dim", ` ${state.nudgeCount}/${state.maxNudges}`);
-	const phase = currentPhase();
-	let glyph: string;
-	switch (phase.kind) {
-		case "suspended":
-			glyph = fg(ctx, "muted", "⏱⏸");
-			break;
-		case "interrupted":
-			// ESC stopped the last run: no nudge this idle spell, so show that.
-			glyph = fg(ctx, "muted", "⏱⏹");
-			break;
-		case "counting":
-			glyph = fg(ctx, "accent", `⏱${phase.remainingSeconds}s`);
-			break;
-		case "paused-input":
-		case "paused-activity":
-			glyph = fg(ctx, "muted", "⏱✍");
-			break;
-		case "idle":
-			glyph = fg(ctx, "muted", "⏱▶");
-			break;
+	// Never let a paint throw: this runs from a timer, and pi exits on an uncaught timer error.
+	try {
+		const count = fg(ctx, "dim", ` ${state.nudgeCount}/${state.maxNudges}`);
+		const phase = currentPhase();
+		let glyph: string;
+		switch (phase.kind) {
+			case "suspended":
+				glyph = fg(ctx, "muted", "⏱⏸");
+				break;
+			case "interrupted":
+				// ESC stopped the last run: no nudge this idle spell, so show that.
+				glyph = fg(ctx, "muted", "⏱⏹");
+				break;
+			case "counting":
+				glyph = fg(ctx, "accent", `⏱${phase.remainingSeconds}s`);
+				break;
+			case "paused-input":
+			case "paused-activity":
+				glyph = fg(ctx, "muted", "⏱✍");
+				break;
+			case "idle":
+				glyph = fg(ctx, "muted", "⏱▶");
+				break;
+		}
+		ctx.ui.setStatus(STATUS_KEY, glyph + count);
+	} catch {
+		// Stale ctx: that status line went away with its session, so there is nothing to paint.
 	}
-	ctx.ui.setStatus(STATUS_KEY, glyph + count);
 }

@@ -4,13 +4,14 @@ import { DECISION_MESSAGE, DECISION_MESSAGE_TYPE, STATUS_KEY } from "./constants
 import { MODE_POLICY } from "./mode.ts";
 import { hasMessages } from "./run-scan.ts";
 import {
-	activeCtx,
 	clearCountdown,
 	createExchangeId,
+	getActiveCtx,
+	getLastMistake,
 	getPi,
+	getUnsubTerminalInput,
 	isRunning,
 	isSuspended,
-	lastMistake,
 	setActiveCtx,
 	setDecisionWindow,
 	setLastMistake,
@@ -18,11 +19,26 @@ import {
 	setUnsubTerminalInput,
 	state,
 	stopWithoutCtx,
-	unsubTerminalInput,
 } from "./state.ts";
-import { editorHasText, publishState, publishStopped, renderStatus, userActive } from "./status.ts";
+import { ctxAlive, editorHasText, publishState, publishStopped, renderStatus, userActive } from "./status.ts";
 
 /** Countdown, pause/resume, teardown, ticker, and sending the decision check. */
+
+/**
+ * A replaced session leaves us a dead ctx: pi exits on an uncaught timer throw, so hanging up beats painting.
+ * Touches no UI and no event bus, because both die with the session that the ctx points at.
+ */
+function dropStaleCtx(ctx: ExtensionContext): boolean {
+	if (ctxAlive(ctx)) return false;
+	setActiveCtx(null);
+	stopWithoutCtx();
+	return true;
+}
+
+// Module-graph-proof reads: always fetch through the process-global carrier.
+const activeCtx = () => getActiveCtx();
+const unsubTerminalInput = () => getUnsubTerminalInput();
+const lastMistake = () => getLastMistake();
 
 /**
  * Stop or pause: clear timers and status; keep mode only pauses, and the tool stays registered to keep the prompt cache stable.
@@ -42,14 +58,19 @@ export function teardown(ctx?: ExtensionContext, force = true, publish = true) {
 	}
 	if (!suspend) {
 		// All the way off: wipe the status line and stop watching keys.
-		(ctx ?? activeCtx)?.ui.setStatus(STATUS_KEY, undefined);
-		if (unsubTerminalInput) {
-			unsubTerminalInput();
+		try {
+			(ctx ?? activeCtx())?.ui.setStatus(STATUS_KEY, undefined);
+		} catch {
+			// Stale ctx: its session took the status line away, so there is nothing left to wipe.
+		}
+		const unsub = unsubTerminalInput();
+		if (unsub) {
+			unsub();
 			setUnsubTerminalInput(null);
 		}
 	} else {
 		// Napping: keep the status line, so the user still sees ⏱⏸.
-		const target = ctx ?? activeCtx;
+		const target = ctx ?? activeCtx();
 		if (target) renderStatus(target);
 	}
 	if (publish) publishState();
@@ -58,6 +79,7 @@ export function teardown(ctx?: ExtensionContext, force = true, publish = true) {
 /** Wake a paused keep-mode watchdog: keep the old settings, reset the nudge count. */
 export function resumeWatchdog(ctx: ExtensionContext) {
 	if (!isSuspended()) return;
+	if (dropStaleCtx(ctx)) return;
 	state.status = "running";
 	state.nudgeCount = 0;
 	state.interrupted = false;
@@ -87,7 +109,7 @@ export function resumeWatchdog(ctx: ExtensionContext) {
 
 /** Watch raw keys: any key means the user is busy, so pause the countdown right away (only interactive mode gives us onTerminalInput). */
 export function ensureTerminalInputListener(ctx: ExtensionContext) {
-	if (unsubTerminalInput) return;
+	if (unsubTerminalInput()) return;
 	const ui = ctx.ui as any;
 	if (typeof ui.onTerminalInput !== "function") return;
 	setUnsubTerminalInput(
@@ -97,7 +119,7 @@ export function ensureTerminalInputListener(ctx: ExtensionContext) {
 			// A key just landed, so pause now instead of waiting for the ticker.
 			clearCountdown();
 			state.pausedByActivity = true;
-			renderStatus(activeCtx ?? ctx);
+			renderStatus(activeCtx() ?? ctx);
 		}),
 	);
 }
@@ -135,6 +157,7 @@ export function armCountdown(ctx: ExtensionContext) {
 async function fireNudge(ctx: ExtensionContext) {
 	state.countdownDeadline = null;
 	if (!isRunning()) return;
+	if (dropStaleCtx(ctx)) return;
 	if (!ctx.isIdle()) {
 		// Busy right now: another run (its agent_settled re-arms us), or pi compacting, which never fires
 		// agent_settled at all. Don't drop the idle spell; the ticker re-arms once the session is idle.
@@ -192,8 +215,9 @@ export function sendDecision(ctx: ExtensionContext): boolean {
 		setDecisionWindow({ exchangeId });
 		// The previous check's mistake rides along in the prompt: the model cannot learn from a failure it
 		// never sees, and a fresh check with no mention of it is how the same mistake repeated twice.
-		const content = lastMistake
-			? `${DECISION_MESSAGE}\n\nYour last check went unanswered because of your own mistake: ${lastMistake}. This is a new check — answer it now.`
+		const prevMistake = lastMistake();
+		const content = prevMistake
+			? `${DECISION_MESSAGE}\n\nYour last check went unanswered because of your own mistake: ${prevMistake}. This is a new check — answer it now.`
 			: DECISION_MESSAGE;
 		setLastMistake(undefined); // one mention per check; a new mistake replaces it
 		// display:true shows the collapsed check hint; details.exchangeId lets the context hook and the hint renderer find this exchange.
@@ -223,27 +247,29 @@ export function sendDecision(ctx: ExtensionContext): boolean {
 export function startTicker() {
 	if (state.ticker) clearInterval(state.ticker);
 	state.ticker = setInterval(() => {
-		if (!isRunning() || !activeCtx) return;
+		const active = activeCtx();
+		if (!isRunning() || !active) return;
+		if (dropStaleCtx(active)) return;
 		if (state.waitingForIdle) {
 			// The countdown ran out while the session was busy; start a fresh one the moment it is idle.
-			if (activeCtx.isIdle()) armCountdown(activeCtx);
+			if (active.isIdle()) armCountdown(active);
 			return;
 		}
 		if (state.countdownDeadline != null) {
-			if (editorHasText(activeCtx) || userActive()) {
-				const byText = editorHasText(activeCtx);
+			if (editorHasText(active) || userActive()) {
+				const byText = editorHasText(active);
 				clearCountdown();
 				state.pausedByInput = byText;
 				state.pausedByActivity = !byText;
 			}
-			renderStatus(activeCtx);
-		} else if ((state.pausedByInput || state.pausedByActivity) && !editorHasText(activeCtx) && !userActive()) {
+			renderStatus(active);
+		} else if ((state.pausedByInput || state.pausedByActivity) && !editorHasText(active) && !userActive()) {
 			state.pausedByInput = false;
 			state.pausedByActivity = false;
-			if (activeCtx.isIdle()) {
-				armCountdown(activeCtx);
+			if (active.isIdle()) {
+				armCountdown(active);
 			} else {
-				renderStatus(activeCtx); // AI is running; agent_settled will re-arm.
+				renderStatus(active); // AI is running; agent_settled will re-arm.
 			}
 		}
 	}, 1000);

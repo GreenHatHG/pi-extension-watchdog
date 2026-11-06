@@ -2,6 +2,9 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { DEFAULT_MAX_NUDGES, DEFAULT_TIMEOUT_SECONDS, type Decision, type StopDecision } from "./constants.ts";
 import type { WatchdogMode } from "./mode.ts";
 
+// Shared accessors for the globals() carrier live at the bottom; the interfaces below only
+// describe shapes, so their order relative to globals() does not matter at runtime.
+
 /** One decision exchange: from the nudge we send until that turn settles. */
 export interface DecisionWindow {
 	exchangeId: string;
@@ -84,97 +87,206 @@ export interface PendingProactiveStop {
 
 /** True while status is "running"; every old `state.running` read works unchanged. */
 export function isRunning(): boolean {
-	return state.status === "running";
+	return globals().state.status === "running";
 }
 /** True while status is "suspended" (keep mode nap); read-only view of status. */
 export function isSuspended(): boolean {
-	return state.status === "suspended";
+	return globals().state.status === "suspended";
 }
 
-// pi loads this extension once, so one module-level state is enough.
-export const state: WatchdogState = {
-	status: "stopped",
-	mode: "once",
-	timeoutMs: DEFAULT_TIMEOUT_SECONDS * 1000,
-	message: "", // Extra instruction only; continuationText glues on the fixed trigger line.
-	maxNudges: DEFAULT_MAX_NUDGES,
-	nudgeCount: 0,
-	countdownDeadline: null,
-	pausedByInput: false,
-	pausedByActivity: false,
-	lastInputAt: 0,
-	interrupted: false,
-	waitingForIdle: false,
-	timer: null,
-	ticker: null,
-};
+/**
+ * Process-global carrier for every piece of shared mutable state.
+ *
+ * pi loads extension modules through jiti with `moduleCache: false` (loader.js), so the same
+ * src/*.ts file can be instantiated into several module graphs in one process (extension reload,
+ * a second import path, a rebuilt factory). Module-level singletons are NOT shared across those
+ * graphs: the tool closure in one graph set `decisionWindow` while `onAgentSettled` in another
+ * graph read null — the check was answered but no card, fold marker or continuation was ever
+ * written (missing on the timeline since the Oct-23 refactor). Stashing everything on globalThis
+ * makes every graph resolve the same instances, whatever pi's loader does.
+ */
+const STATE_KEY = "__piWatchdogState";
 
-// The rest of the shared mutable state. Written from several modules, so each exposes a setter:
-// an imported `let` can be read across modules but only reassigned in its own module.
+interface WatchdogGlobals {
+	state: WatchdogState;
+	activeCtx: ExtensionContext | null;
+	decisionWindow: DecisionWindow | null;
+	pendingProactiveStop: PendingProactiveStop | null;
+	lastMistake: string | undefined;
+	silentStopWarned: boolean;
+	onStopFired: boolean;
+	toolRegistered: boolean;
+	unsubTerminalInput: (() => void) | null;
+	exchangeCounter: number;
+	pi: ExtensionAPI | undefined;
+	expandedHintIds: Set<string>;
+	expandedCardIds: Set<string>;
+	emptyStreak: number;
+}
+
+/** The one shared carrier, for sibling modules (expanded.ts) that hold shared sets. */
+export function getGlobals(): WatchdogGlobals {
+	return globals();
+}
+
+function globals(): WatchdogGlobals {
+	const carrier = globalThis as typeof globalThis & { [STATE_KEY]?: WatchdogGlobals };
+	if (!carrier[STATE_KEY]) {
+		carrier[STATE_KEY] = {
+			state: freshState(),
+			activeCtx: null,
+			decisionWindow: null,
+			pendingProactiveStop: null,
+			lastMistake: undefined,
+			silentStopWarned: false,
+			onStopFired: false,
+			toolRegistered: false,
+			unsubTerminalInput: null,
+			exchangeCounter: 0,
+			pi: undefined,
+			expandedHintIds: new Set(),
+			expandedCardIds: new Set(),
+			emptyStreak: 0,
+		};
+	}
+	return carrier[STATE_KEY];
+}
+
+/**
+ * Reset every field a fresh plugin instance used to start with. The factory runs per session in pi,
+ * and the test suite calls it after vi.resetModules() expecting brand-new state; with a process-global
+ * carrier this reset IS the fresh start.
+ */
+export function resetGlobalsForNewSession() {
+	const g = globals();
+	g.state = freshState();
+	g.activeCtx = null;
+	g.decisionWindow = null;
+	g.pendingProactiveStop = null;
+	g.lastMistake = undefined;
+	g.silentStopWarned = false;
+	g.onStopFired = false;
+	g.toolRegistered = false;
+	g.unsubTerminalInput = null;
+	g.expandedHintIds.clear();
+	g.expandedCardIds.clear();
+	g.emptyStreak = 0;
+}
+
+function freshState(): WatchdogState {
+	return {
+		status: "stopped",
+		mode: "once",
+		timeoutMs: DEFAULT_TIMEOUT_SECONDS * 1000,
+		message: "", // Extra instruction only; continuationText glues on the fixed trigger line.
+		maxNudges: DEFAULT_MAX_NUDGES,
+		nudgeCount: 0,
+		countdownDeadline: null,
+		pausedByInput: false,
+		pausedByActivity: false,
+		lastInputAt: 0,
+		interrupted: false,
+		waitingForIdle: false,
+		timer: null,
+		ticker: null,
+	};
+}
+
+/** The one shared watchdog state object, wherever this module graph was loaded from. */
+export const state: WatchdogState = new Proxy({} as WatchdogState, {
+	get(_t, prop) {
+		return Reflect.get(globals().state, prop);
+	},
+	set(_t, prop, value) {
+		return Reflect.set(globals().state, prop, value);
+	},
+});
 
 /** Last ctx we saw; the ticker needs it to repaint the status bar. */
-export let activeCtx: ExtensionContext | null = null;
+export function getActiveCtx(): ExtensionContext | null {
+	return globals().activeCtx;
+}
 export function setActiveCtx(ctx: ExtensionContext | null) {
-	activeCtx = ctx;
+	globals().activeCtx = ctx;
 }
 
 /** The decision turn we are inside, if any. */
-export let decisionWindow: DecisionWindow | null = null;
+export function getDecisionWindow(): DecisionWindow | null {
+	return globals().decisionWindow;
+}
 export function setDecisionWindow(window: DecisionWindow | null) {
-	decisionWindow = window;
+	globals().decisionWindow = window;
 }
 
-export let pendingProactiveStop: PendingProactiveStop | null = null;
+export function getPendingProactiveStop(): PendingProactiveStop | null {
+	return globals().pendingProactiveStop;
+}
 export function setPendingProactiveStop(stop: PendingProactiveStop | null) {
-	pendingProactiveStop = stop;
+	globals().pendingProactiveStop = stop;
 }
 
 /** The mistake the last check caught (wrong tool, text-only answer); shown once in the next check's prompt. */
-export let lastMistake: string | undefined;
+export function getLastMistake(): string | undefined {
+	return globals().lastMistake;
+}
 export function setLastMistake(mistake: string | undefined) {
-	lastMistake = mistake;
+	globals().lastMistake = mistake;
 }
 
 /** Set after we threw once at a silent proactive stop in this run; the next one fails open. */
-export let silentStopWarned = false;
+export function isSilentStopWarned(): boolean {
+	return globals().silentStopWarned;
+}
 export function setSilentStopWarned(warned: boolean) {
-	silentStopWarned = warned;
+	globals().silentStopWarned = warned;
 }
 
 /** ON_STOP already fired for this watchdog run. One run = one stop = one hook execution; a second
  * stop (or a re-entrant stop from a child process inheriting the env) must not re-run the chain. */
-export let onStopFired = false;
+export function hasOnStopFired(): boolean {
+	return globals().onStopFired;
+}
 export function setOnStopFired(fired: boolean) {
-	onStopFired = fired;
+	globals().onStopFired = fired;
 }
 
 /** Register watchdog_decide once and never remove it, to keep the prompt cache prefix stable. */
-export let toolRegistered = false;
+export function isToolRegistered(): boolean {
+	return globals().toolRegistered;
+}
 export function setToolRegistered(registered: boolean) {
-	toolRegistered = registered;
+	globals().toolRegistered = registered;
 }
 
 /** Cancel handle for the raw-key listener; only interactive mode gives us one. */
-export let unsubTerminalInput: (() => void) | null = null;
+export function getUnsubTerminalInput(): (() => void) | null {
+	return globals().unsubTerminalInput;
+}
 export function setUnsubTerminalInput(unsub: (() => void) | null) {
-	unsubTerminalInput = unsub;
+	globals().unsubTerminalInput = unsub;
 }
 
-let exchangeCounter = 0;
-
 export function createExchangeId(): string {
-	exchangeCounter += 1;
-	return `w${Date.now().toString(36)}-${exchangeCounter}`;
+	const g = globals();
+	g.exchangeCounter += 1;
+	return `w${Date.now().toString(36)}-${g.exchangeCounter}`;
 }
 
 // One pi handle for every module; set once by the extension factory.
-let pi: ExtensionAPI | undefined;
+/** Back-to-back empty replies from the model; the card shows the streak, and a warning fires at the threshold. */
+export function getEmptyStreak(): number {
+	return globals().emptyStreak;
+}
+export function setEmptyStreak(streak: number) {
+	globals().emptyStreak = streak;
+}
 
 export function setPi(api: ExtensionAPI) {
-	pi = api;
+	globals().pi = api;
 }
 
 export function getPi(): ExtensionAPI {
+	const pi = globals().pi;
 	if (pi === undefined) throw new Error("watchdog: extension not initialized yet");
 	return pi;
 }
@@ -203,8 +315,9 @@ export function stopWithoutCtx() {
 		clearInterval(state.ticker);
 		state.ticker = null;
 	}
-	if (unsubTerminalInput) {
-		unsubTerminalInput();
+	const unsub = globals().unsubTerminalInput;
+	if (unsub) {
+		unsub();
 		setUnsubTerminalInput(null);
 	}
 }

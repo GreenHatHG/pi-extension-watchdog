@@ -26,16 +26,16 @@ import type { DecisionCardData } from "./decision-card.ts";
 import { turnCarriesText } from "./run-scan.ts";
 import {
 	createExchangeId,
-	decisionWindow,
+	getDecisionWindow,
 	getPi,
+	hasOnStopFired,
 	isRunning,
+	isSilentStopWarned,
 	isSuspended,
-	onStopFired,
 	type PendingProactiveStop,
 	setOnStopFired,
 	setPendingProactiveStop,
 	setSilentStopWarned,
-	silentStopWarned,
 	state,
 } from "./state.ts";
 import { publishStopped } from "./status.ts";
@@ -135,6 +135,7 @@ export function registerDecideTool() {
 			// The check turn is open: this call is the answer. Guarded rather than trusted: pi validates the
 			// schema before execute, but the check turn runs with every other tool blocked, so a payload that
 			// slipped through must not be silently read as "no answer".
+			const decisionWindow = getDecisionWindow();
 			if (decisionWindow !== null) {
 				const window = decisionWindow; // keep the window we answered, even if a later send clears it
 				if (decision === undefined || !DECISIONS.includes(decision)) {
@@ -168,7 +169,7 @@ export function registerDecideTool() {
 				);
 			}
 			// A silent proactive stop reads as "conclusion left in a tool result"; nudge once, then fail open.
-			if (!silentStopWarned && !turnCarriesText(toolCallId, ctx)) {
+			if (!isSilentStopWarned() && !turnCarriesText(toolCallId, ctx)) {
 				setSilentStopWarned(true);
 				throw new Error(UNDELIVERED_STOP_NOTE);
 			}
@@ -199,7 +200,7 @@ function stopWatchdog(
 	// a test suite spawned by a sub-agent) must not re-run it — a stale wait-for or kill-session
 	// from a repeat firing kills the wrong pane.
 	const onStop = process.env.PI_WATCHDOG_ON_STOP?.trim();
-	if (onStop && !onStopFired) {
+	if (onStop && !hasOnStopFired()) {
 		setOnStopFired(true);
 		// Stamp the flight recorder so a "mystery SIGHUP + exit=98" can be attributed after the fact.
 		const dbg = process.env.PI_SUBAGENT_DEBUG?.trim();
@@ -217,6 +218,7 @@ function stopWatchdog(
 	publishStopped("ai-stop", isSuspended());
 	// Capture the nap now: a user message between here and agent_settled resumes us, and the card
 	// would read fresh state instead of the state the stop actually left.
+	const decisionWindow = getDecisionWindow();
 	if (decisionWindow !== null) decisionWindow.suspended = isSuspended();
 	if (decisionWindow === null) {
 		// No check turn: hold the record until the run settles. The marker has to be the last row of the turn

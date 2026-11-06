@@ -28,20 +28,23 @@ import {
 import { armCountdown, resumeWatchdog, teardown } from "./countdown.ts";
 import { markProactiveStop, recordProactiveStop } from "./decide-tool.ts";
 import { type DecisionCardData, registerDecisionCardRenderers } from "./decision-card.ts";
-import { expandedCardIds, expandedHintIds } from "./expanded.ts";
+import { getExpandedCardIds, getExpandedHintIds } from "./expanded.ts";
 import { registerWatchdogContextFolding } from "./fold.ts";
 import { MODE_POLICY } from "./mode.ts";
 import { decisionOutcome, lastAssistantText, runError, runWasAborted, settledMessages } from "./run-scan.ts";
 import { startWatchdog } from "./start.ts";
 import {
 	clearCountdown,
-	decisionWindow,
+	getDecisionWindow,
+	getEmptyStreak,
+	getPendingProactiveStop,
 	getPi,
 	isRunning,
 	isSuspended,
-	pendingProactiveStop,
+	resetGlobalsForNewSession,
 	setActiveCtx,
 	setDecisionWindow,
+	setEmptyStreak,
 	setLastMistake,
 	setPendingProactiveStop,
 	setPi,
@@ -52,18 +55,19 @@ import {
 import { publishState, renderStatus } from "./status.ts";
 import { isRestoredReason } from "./utils.ts";
 
-/** Back-to-back empty replies from the model; the card shows the streak, and a warning fires at the threshold. */
-let emptyStreak = 0;
 /** After this many silent checks in a row, tell the user the model looks broken. */
 const EMPTY_STREAK_WARN = 3;
 
 export default function (extensionApi: ExtensionAPI) {
+	// The state carrier is process-global (see state.ts), so a factory run — a new session in pi, or a
+	// fresh module graph in tests — must reset it to what a brand-new module graph used to hold.
+	resetGlobalsForNewSession();
 	setPi(extensionApi);
 	// pi re-runs this factory for every new session but keeps the module cached, so clear the flag here.
 	// Left alone it would carry the previous session's registration into this one, whose tool table is empty,
 	// and startWatchdog would skip registerDecideTool, leaving the AI without watchdog_decide.
 	setToolRegistered(false);
-	emptyStreak = 0;
+	setEmptyStreak(0);
 	setSilentStopWarned(false);
 	// Same reason: a stop whose run never settled must not follow us into the new session.
 	setPendingProactiveStop(null);
@@ -71,8 +75,8 @@ export default function (extensionApi: ExtensionAPI) {
 	// Must run now, not at start: resuming a session replays saved nudge messages, and a missing renderer would show their raw text.
 	registerDecisionCardRenderers(getPi());
 	// Both types of a check keep one open state per exchange by entry id, so they reset on a new run.
-	expandedHintIds.clear();
-	expandedCardIds.clear();
+	getExpandedHintIds().clear();
+	getExpandedCardIds().clear();
 
 	// ---- Every hook we listen to, in lifecycle order. ----
 
@@ -170,6 +174,7 @@ function onAgentStart(_event: AgentStartEvent, ctx: ExtensionContext) {
  * the turn instead of costing one more model call.
  */
 function onToolCall(event: ToolCallEvent): ToolCallEventResult | undefined {
+	const decisionWindow = getDecisionWindow();
 	if (decisionWindow === null) return;
 	if (event.toolName === TOOL_NAME) return;
 	// The model reached for a wrong tool in a check turn: record it, so the card and the next check can say
@@ -193,6 +198,7 @@ function onToolCall(event: ToolCallEvent): ToolCallEventResult | undefined {
  * before the run ends, which the guard below reads.
  */
 function onAgentEnd(event: AgentEndEvent, ctx: ExtensionContext) {
+	const decisionWindow = getDecisionWindow();
 	if (isRunning() && decisionWindow !== null) {
 		// Pi may retry a run internally, so read the newest decision from every agent_end; the
 		// final one before agent_settled decides whether the check really failed.
@@ -231,6 +237,7 @@ function onAgentEnd(event: AgentEndEvent, ctx: ExtensionContext) {
  * `superseded` instead of sending a continuation on top of their message.
  */
 function onMessageEnd(event: MessageEndEvent) {
+	const decisionWindow = getDecisionWindow();
 	if (decisionWindow === null) return;
 	if ((event.message as { role?: unknown }).role !== "user") return;
 	decisionWindow.userInterjected = true;
@@ -244,7 +251,7 @@ function onMessageEnd(event: MessageEndEvent) {
  * follow-up model call and no abort is fired. Nothing here has to clean up after a phantom row.
  */
 async function onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext) {
-	const window = decisionWindow;
+	const window = getDecisionWindow();
 	setDecisionWindow(null);
 	if (window !== null) {
 		// A decision turn is void (superseded) when the user jumped in, the turn isn't idle, or ESC hit.
@@ -308,16 +315,16 @@ async function onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext) 
 		// (the model sees its mistake), and failed means the provider died — neither is "the model went quiet".
 		let streak: number | undefined;
 		if (outcome === "empty" && window.mistake === undefined) {
-			emptyStreak += 1;
-			streak = emptyStreak;
-			if (emptyStreak === EMPTY_STREAK_WARN) {
+			setEmptyStreak(getEmptyStreak() + 1);
+			streak = getEmptyStreak();
+			if (getEmptyStreak() === EMPTY_STREAK_WARN) {
 				ctx.ui.notify(
 					`watchdog: the model replied empty ${EMPTY_STREAK_WARN} checks in a row — it looks broken; /watchdog stop if this is a loop`,
 					"warning",
 				);
 			}
 		} else if (outcome !== "failed") {
-			emptyStreak = 0;
+			setEmptyStreak(0);
 		}
 		getPi().appendEntry<DecisionCardData>(DECISION_ENTRY_TYPE, {
 			exchangeId: window.exchangeId,
@@ -344,7 +351,7 @@ async function onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext) 
  * AI's closing text inside the folded range instead of leaving it in every later request.
  */
 function onProactiveStopSettled(_event: AgentSettledEvent) {
-	const stop = pendingProactiveStop;
+	const stop = getPendingProactiveStop();
 	setPendingProactiveStop(null);
 	if (stop === null) return;
 	recordProactiveStop(stop);
