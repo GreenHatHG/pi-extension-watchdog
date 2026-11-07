@@ -1,6 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { ACTIVITY_GRACE_MS, STATUS_KEY, WATCHDOG_STOPPED_EVENT } from "./constants.ts";
-import { getPi, isRunning, isSuspended, state } from "./state.ts";
+import { getDecisionWindow, getPi, isRunning, isSuspended, state } from "./state.ts";
 
 /** Emit on the pi bus; a stale handle after a reload throws, and a dead bus has no listeners to warn. */
 function emitSafely(name: string, data: unknown) {
@@ -13,6 +13,10 @@ function emitSafely(name: string, data: unknown) {
 export function publishState() {
 	emitSafely("watchdog:state", {
 		running: isRunning(),
+		// A decision window is open: a refusal that demands work (e.g. the verification gate blocking
+		// "done") would be unsatisfiable here — every tool but watchdog_decide is blocked — so consumers
+		// must let the stop through and push their demand into the continuation instead.
+		checkTurn: getDecisionWindow() !== null,
 		suspended: isSuspended(),
 		keepAlive: state.mode === "keep",
 		countdownArmed: state.countdownDeadline != null,

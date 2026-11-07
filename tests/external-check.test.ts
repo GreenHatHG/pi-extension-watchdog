@@ -61,6 +61,22 @@ it("no external answer keeps the built-in model check", async () => {
 	expect(continuationMessages(rt)).toHaveLength(0);
 });
 
+it("the state broadcast carries checkTurn while a decision window is open", async () => {
+	const rt = await setup();
+	const states: any[] = [];
+	rt.pi.events.on("watchdog:state", (s: unknown) => states.push(s));
+	await startAndSettle(rt);
+
+	// The nudge opened a decision window: the broadcast must say so, so consumers gating "done"
+	// (verification gate) can stand down instead of making an unsatisfiable demand.
+	expect(states.at(-1)).toMatchObject({ running: true, checkTurn: true });
+
+	// Answer the check: the turn settles, the window closes, and the broadcast flips back.
+	await rt.tools.get("watchdog_decide").execute("p1", { decision: "continue" }, undefined, undefined, rt.ctx);
+	await rt.settleAfterRun();
+	expect(states.at(-1)).toMatchObject({ checkTurn: false });
+});
+
 it("an invalid answer is ignored and the built-in check runs", async () => {
 	const rt = await setup();
 	rt.pi.events.on("watchdog:check", (event: ExternalCheckEvent) => {

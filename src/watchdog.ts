@@ -1,4 +1,3 @@
-import { writeFileSync } from "node:fs";
 import type {
 	AgentEndEvent,
 	AgentSettledEvent,
@@ -107,16 +106,6 @@ export default function (extensionApi: ExtensionAPI) {
 
 /** Session opened: auto-start when the env var asks for it. */
 function onSessionStart(event: SessionStartEvent, ctx: ExtensionContext) {
-	// Authorize THIS process for the sub-agent wrap-up chain: the ON_STOP shell string (inherited by
-	// every descendant, e.g. vitest workers running our tests) only fires when its spawning process
-	// pid matches the pid written here. Without this, a test calling watchdog_decide("done") would
-	// kill-session the sub-agent pane mid-run. Best-effort: diagnostics must never break startup.
-	const pidFile = process.env.PI_WATCHDOG_PIDFILE?.trim();
-	if (pidFile) {
-		try {
-			writeFileSync(pidFile, `${process.pid}\n`);
-		} catch {}
-	}
 	// Reload means a manual hot-reload mid-session: the watchdog was already shut down for it, and
 	// auto-restarting here would count down on a session that did no work yet. /watchdog starts it again.
 	if (event.reason === "reload") {
@@ -253,6 +242,9 @@ function onMessageEnd(event: MessageEndEvent) {
 async function onAgentSettled(_event: AgentSettledEvent, ctx: ExtensionContext) {
 	const window = getDecisionWindow();
 	setDecisionWindow(null);
+	// The window is gone either way: publish before any return, so consumers gating tools off the
+	// state broadcast (verification gate × "done") see the check turn close.
+	publishState();
 	if (window !== null) {
 		// A decision turn is void (superseded) when the user jumped in, the turn isn't idle, or ESC hit.
 		// We must still drop a terminal marker, or the "keep until a marker" rule makes the decision prompt stick forever.

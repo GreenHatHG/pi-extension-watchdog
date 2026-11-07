@@ -240,6 +240,10 @@ export function sendDecision(ctx: ExtensionContext): boolean {
 		return false;
 	}
 	renderStatus(ctx);
+	// Broadcast the open decision window: consumers gating "done" must stand down while every other
+	// tool is blocked here, or their refusal becomes an unsatisfiable demand (the done×verification
+	// deadlock). onAgentSettled's publish covers the close side.
+	publishState();
 	return true;
 }
 

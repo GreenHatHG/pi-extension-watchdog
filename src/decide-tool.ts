@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
 import type { AgentToolResult, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -207,6 +207,17 @@ function stopWatchdog(
 		if (dbg) {
 			try {
 				appendFileSync(dbg, `${new Date().toISOString()} ON_STOP fired (watchdog stop path: ${toolCallId})\n`);
+			} catch {}
+		}
+		// Write the pidfile HERE, not at session_start: the ON_STOP chain this spawn creates compares
+		// its $PPID against the pidfile, and this process IS that $PPID. A session_start-time snapshot
+		// went stale whenever the pi host replaced itself (reload, restart), so the guard compared a
+		// dead pid against a live one and silently skipped the whole wrap-up. Writing at stop time
+		// makes writer and $PPID the same process by construction — nothing to drift.
+		const pidFile = process.env.PI_WATCHDOG_PIDFILE?.trim();
+		if (pidFile) {
+			try {
+				writeFileSync(pidFile, `${process.pid}\n`);
 			} catch {}
 		}
 		spawn("sh", ["-c", onStop], { stdio: "ignore", detached: true }).unref();
